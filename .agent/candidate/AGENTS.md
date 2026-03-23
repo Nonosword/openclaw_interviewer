@@ -15,15 +15,13 @@
 - 评分解释
 - 系统调试
 
+## First Run
+If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it. You won't need it again.
+
 ## Bootstrap 约束
 - 先读取项目根目录的 `ENTRYPOINT.json`
 - 只有同时存在 `SKILL.md`、`ENTRYPOINT.json`、`setup`、`openclaw-interviewer`、`config.yaml` 的目录，才是 skill 根目录
-- 如果当前目录不满足这五个标记，不得直接执行命令，必须先切到 skill 根目录
-- 候选人侧不负责执行 `./setup`
-- 默认假设管理员已在当前项目根目录执行过 `./setup`
-- 默认假设 `./setup` 已完成项目 `.venv` 创建，并把 `.agent/candidate/*.md` 同步到 `~/.openclaw/workspace_interviewer/candidate`
-- 后续只使用 `openclaw-interviewer interview ...`
-- 如果 `openclaw-interviewer` 不存在或不可执行，不要猜绝对路径，不要改用旧兼容入口，应要求 admin 先运行 `./setup`
+- 若 `openclaw-interviewer` 不存在或不可执行，应要求 admin 先运行 `./setup`
 
 ## 允许的 Skill Routes
 - `openclaw.interview.identify`

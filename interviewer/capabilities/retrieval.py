@@ -10,18 +10,18 @@ class LocalRetrieval:
     def __init__(self, root: str | Path):
         self.storage = Storage(root)
 
-    def select_initial_questions(self, *, jd_id: str | None = None, knowledge_id: str | None = None, resume_file: str, question_distribution: dict[str, int], resume_count: int) -> list[dict[str, Any]]:
+    def load_domain_questions(self, *, jd_id: str | None = None, knowledge_id: str | None = None) -> list[dict[str, Any]]:
         domain_id = jd_id or knowledge_id
         if not domain_id:
-            raise ValueError("missing_jd_id")
-        domain_rows = self.storage.read_jsonl(self.storage.domain_q_dir / f"{domain_id}.questions.jsonl")
-        resume_rows = self.storage.read_jsonl(self._resume_artifact_path(f"data/{self._resume_artifact_key(resume_file)}.questions.jsonl"))
-        selected: list[dict[str, Any]] = []
-        for difficulty, count in question_distribution.items():
-            bucket = [row for row in domain_rows if row.get("difficulty") == difficulty][:count]
-            selected.extend(bucket)
-        selected.extend(resume_rows[:resume_count])
-        return selected
+            raise ValueError('missing_jd_id')
+        return self.storage.read_jsonl(self.storage.domain_q_dir / f'{domain_id}.questions.jsonl')
+
+    def load_resume_questions(self, resume_profile_file: str) -> list[dict[str, Any]]:
+        profile = self.load_resume_profile(resume_profile_file)
+        bank_ref = str(profile.get('resume_question_bank_ref') or '')
+        if not bank_ref:
+            raise ValueError('resume_question_bank_missing')
+        return self.storage.read_jsonl(self._resume_artifact_path(bank_ref))
 
     def retrieve_domain_evidence(self, jd_id: str | None = None, query: str = "", knowledge_id: str | None = None) -> list[dict[str, Any]]:
         domain_id = jd_id or knowledge_id
@@ -36,7 +36,10 @@ class LocalRetrieval:
         return self._score_rows(rows, query, text_key="text")[:4]
 
     def load_resume_profile(self, resume_profile_file: str) -> dict[str, Any]:
-        return self.storage.load_json(self._resume_artifact_path(resume_profile_file)) or {}
+        payload = self.storage.load_json(self._resume_artifact_path(resume_profile_file)) or {}
+        if not payload:
+            raise ValueError('resume_profile_missing')
+        return payload
 
     def summarize_weak_topics(self, history: list[dict[str, Any]]) -> list[str]:
         weak = []

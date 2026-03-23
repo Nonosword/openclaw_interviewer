@@ -103,6 +103,8 @@ class InterviewRuntime:
     max_question_seconds: int = 300
     asked_question_ids: list[str] = field(default_factory=list)
     completed_case: bool = False
+    case_question_count: int = 0
+    plan_summary: dict[str, Any] = field(default_factory=dict)
     event_cursor: int = 0
 
     def to_dict(self) -> dict[str, Any]:

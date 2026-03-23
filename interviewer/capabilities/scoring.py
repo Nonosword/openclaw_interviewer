@@ -1,97 +1,145 @@
 from __future__ import annotations
 
 from datetime import datetime
-import re
+from pathlib import Path
 from typing import Any
+
+from interviewer.config.loader import load_config
+from interviewer.subagents.dispatcher import LocalSubagentDispatcher
 
 
 class Evaluator:
-    def score(self, question: dict[str, Any], reply_text: str, candidate_id: str, started_at: str | None, max_question_seconds: int, evidence: list[dict[str, Any]] | None = None, received_at: str | None = None) -> dict[str, Any]:
-        reply_text = (reply_text or "").strip()
+    def __init__(self, root: str | Path | None = None, dispatcher: LocalSubagentDispatcher | None = None):
+        self.root = Path(root) if root is not None else None
+        self.dispatcher = dispatcher
+
+    def score(
+        self,
+        question: dict[str, Any],
+        reply_text: str,
+        candidate_id: str,
+        started_at: str | None,
+        max_question_seconds: int,
+        *,
+        role_name: str,
+        jd_text: str,
+        resume_profile: dict[str, Any] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        history: list[dict[str, Any]] | None = None,
+        received_at: str | None = None,
+    ) -> dict[str, Any]:
+        reply_text = (reply_text or '').strip()
         received_at = received_at or datetime.now().astimezone().isoformat()
-        matched, missing = self._coverage(question.get("ideal_answer_points", []), reply_text)
-        coverage_ratio = len(matched) / max(len(question.get("ideal_answer_points", [])), 1)
-        has_structure = any(t in reply_text for t in ["首先", "然后", "最后", "第一", "第二", "背景", "验证", "优先", "阶段"])
-        has_case = any(t in reply_text for t in ["例如", "比如", "线上", "日志", "监控", "指标", "回滚", "压测", "报警", "复盘"])
-        evidence_ratio = self._evidence_ratio(reply_text, evidence or [])
         response_seconds = None
-        time_penalty = 0.0
         if started_at:
             try:
                 response_seconds = int((datetime.fromisoformat(received_at) - datetime.fromisoformat(started_at)).total_seconds())
             except Exception:
                 response_seconds = None
-        if response_seconds is not None and response_seconds > max_question_seconds:
-            time_penalty = min(1.5, (response_seconds - max_question_seconds) / max_question_seconds * 2)
-        fluency = max(0.0, min(10.0, round(5.2 + len(reply_text) / 120 + (0.9 if has_structure else 0) - time_penalty, 2)))
-        expression = max(0.0, min(10.0, round(5.0 + len(reply_text) / 130 + (1.0 if has_structure else 0) - time_penalty, 2)))
-        knowledge = max(0.0, min(10.0, round(4.2 + coverage_ratio * 4.8 + evidence_ratio * 1.0, 2)))
-        core = max(0.0, min(10.0, round(4.2 + coverage_ratio * 3.6 + (1.4 if has_case else 0) + evidence_ratio * 0.8, 2)))
-        case = max(0.0, min(10.0, round(4.0 + coverage_ratio * 2.8 + (2.0 if has_case else 0) + evidence_ratio * 1.2, 2)))
-        overall = round((fluency + expression + knowledge + core + case) / 5, 2)
+        dispatcher = self._dispatcher()
+        evaluated = dispatcher.evaluate_answer(
+            question=question,
+            reply_text=reply_text,
+            candidate_id=candidate_id,
+            role_name=role_name,
+            jd_text=jd_text,
+            resume_profile=resume_profile,
+            evidence=evidence or [],
+            history=history or [],
+            started_at=started_at,
+            received_at=received_at,
+            response_seconds=response_seconds,
+            max_question_seconds=max_question_seconds,
+        )
+        evaluated = self._apply_time_penalty(
+            evaluated=evaluated,
+            response_seconds=response_seconds,
+            max_question_seconds=max_question_seconds,
+        )
         return {
-            "question_id": question["question_id"],
-            "question_text": question.get("question", ""),
-            "candidate_id": candidate_id,
-            "reply_text": reply_text,
-            "timing": {"question_started_at": started_at, "reply_received_at": received_at, "response_seconds": response_seconds, "max_question_seconds": max_question_seconds},
-            "coverage": {"matched_points": matched, "missing_points": missing, "coverage_ratio": round(coverage_ratio, 3), "evidence_ratio": evidence_ratio},
-            "score": {"fluency": fluency, "expression": expression, "knowledge": knowledge, "core_competency": core, "case_problem_solving": case, "overall": overall},
-            "reason": self._build_reason(matched, missing, has_structure, has_case, evidence_ratio, time_penalty),
-            "suggestion": self._build_suggestion(missing, has_case, evidence_ratio),
-            "source": question["source"],
-            "difficulty": question["difficulty"],
-            "topic": question["topic"],
-            "source_question_id": question.get("source_question_id"),
-            "evidence_refs": question.get("evidence_refs", []),
+            'question_id': question['question_id'],
+            'question_text': question.get('question', ''),
+            'candidate_id': candidate_id,
+            'reply_text': reply_text,
+            'timing': {
+                'question_started_at': started_at,
+                'reply_received_at': received_at,
+                'response_seconds': response_seconds,
+                'max_question_seconds': max_question_seconds,
+            },
+            'coverage': evaluated['coverage'],
+            'score': evaluated['score'],
+            'reason': str(evaluated.get('reason') or ''),
+            'suggestion': str(evaluated.get('suggestion') or ''),
+            'source': question['source'],
+            'difficulty': question['difficulty'],
+            'topic': question['topic'],
+            'source_question_id': question.get('source_question_id'),
+            'evidence_refs': question.get('evidence_refs', []),
         }
 
-    def _coverage(self, ideal_points: list[str], reply_text: str) -> tuple[list[str], list[str]]:
-        matched, missing = [], []
-        reply_tokens = set(self._tokens(reply_text))
-        for point in ideal_points:
-            point_tokens = set(self._tokens(point))
-            if point in reply_text or point[:6] in reply_text or (point_tokens and len(point_tokens & reply_tokens) >= max(1, min(2, len(point_tokens)))):
-                matched.append(point)
-            else:
-                missing.append(point)
-        return matched, missing
+    def _dispatcher(self) -> LocalSubagentDispatcher:
+        if self.dispatcher is not None:
+            return self.dispatcher
+        cfg = load_config(self.root or Path.cwd())
+        self.dispatcher = LocalSubagentDispatcher(self.root, cfg.subagents)
+        return self.dispatcher
 
-    def _evidence_ratio(self, reply_text: str, evidence: list[dict[str, Any]]) -> float:
-        if not evidence:
-            return 0.0
-        reply_tokens = set(self._tokens(reply_text))
-        hits = 0
-        for row in evidence:
-            ev_tokens = set(self._tokens(" ".join(row.get("keywords", []) + [row.get("text", ""), row.get("subtopic", ""), row.get("topic", "")])) )
-            if reply_tokens & ev_tokens:
-                hits += 1
-        return round(hits / max(len(evidence), 1), 3)
-
-    def _tokens(self, text: str) -> list[str]:
-        return re.findall(r"[A-Za-z][A-Za-z0-9_+.-]*|[一-鿿]{2,}", text or "")
-
-    def _build_reason(self, matched: list[str], missing: list[str], has_structure: bool, has_case: bool, evidence_ratio: float, time_penalty: float) -> str:
-        parts = ["回答结构清晰。" if has_structure else "回答结构性一般。", f"命中关键点 {len(matched)} 个。"]
-        if missing:
-            parts.append(f"缺少 {len(missing)} 个关键点。")
-        parts.append("包含工程案例或证据。" if has_case else "工程案例或证据偏少。")
-        if evidence_ratio > 0:
-            parts.append(f"与知识证据存在 {round(evidence_ratio * 100)}% 对齐。")
-        if time_penalty > 0:
-            parts.append("回答超时，对整体表现有一定影响。")
-        return "".join(parts)
-
-    def _build_suggestion(self, missing: list[str], has_case: bool, evidence_ratio: float) -> str:
-        tips = []
-        if missing:
-            tips.append("建议补齐机制、风险、边界和验证方式。")
-        if not has_case:
-            tips.append("建议增加真实案例、日志、指标或回滚策略。")
-        if evidence_ratio < 0.25:
-            tips.append("建议回答时更贴近岗位/JD/简历中的具体证据。")
-        return "".join(tips) or "可以继续提升复杂场景下的取舍表达。"
+    def _apply_time_penalty(
+        self,
+        *,
+        evaluated: dict[str, Any],
+        response_seconds: int | None,
+        max_question_seconds: int,
+    ) -> dict[str, Any]:
+        if response_seconds is None or max_question_seconds <= 0 or response_seconds <= max_question_seconds:
+            return evaluated
+        penalty = min(1.5, (response_seconds - max_question_seconds) / max_question_seconds * 2)
+        score = dict(evaluated.get('score') or {})
+        for key in ('fluency', 'expression'):
+            if key in score:
+                score[key] = round(max(0.0, min(10.0, float(score.get(key) or 0) - penalty)), 2)
+        numeric_keys = ['fluency', 'expression', 'knowledge', 'core_competency', 'case_problem_solving']
+        present = [float(score.get(key) or 0) for key in numeric_keys if key in score]
+        if present:
+            recomputed_overall = sum(present) / len(present)
+            original_overall = float((evaluated.get('score') or {}).get('overall') or 0)
+            score['overall'] = round(max(0.0, min(original_overall, recomputed_overall) - penalty * 0.5), 2)
+        reason = str(evaluated.get('reason') or '')
+        if '超时' not in reason:
+            reason = f'{reason}回答超时，对表达与整体表现有一定影响。'.strip()
+        updated = dict(evaluated)
+        updated['score'] = score
+        updated['reason'] = reason
+        return updated
 
 
-def score_answer(question: dict[str, Any], reply_text: str, candidate_id: str, started_at: str | None, max_question_seconds: int, evidence: list[dict[str, Any]] | None = None, received_at: str | None = None) -> dict[str, Any]:
-    return Evaluator().score(question, reply_text, candidate_id, started_at, max_question_seconds, evidence=evidence, received_at=received_at)
+def score_answer(
+    question: dict[str, Any],
+    reply_text: str,
+    candidate_id: str,
+    started_at: str | None,
+    max_question_seconds: int,
+    *,
+    role_name: str,
+    jd_text: str,
+    root: str | Path | None = None,
+    dispatcher: LocalSubagentDispatcher | None = None,
+    resume_profile: dict[str, Any] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
+    history: list[dict[str, Any]] | None = None,
+    received_at: str | None = None,
+) -> dict[str, Any]:
+    return Evaluator(root=root, dispatcher=dispatcher).score(
+        question,
+        reply_text,
+        candidate_id,
+        started_at,
+        max_question_seconds,
+        role_name=role_name,
+        jd_text=jd_text,
+        resume_profile=resume_profile,
+        evidence=evidence,
+        history=history,
+        received_at=received_at,
+    )

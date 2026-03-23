@@ -43,3 +43,32 @@ def validate_dialog_candidate(payload: Any) -> dict[str, Any]:
     _expect_type('dialog_candidate', payload, (dict,))
     _expect_keys(payload, ['candidate_name','scheduled_at','interview_role','jd_text','resume_file'])
     return payload
+
+def validate_interview_plan(payload: Any) -> list[dict[str, Any]]:
+    _expect_type('interview_plan', payload, (list,))
+    if not payload:
+        raise ValueError('interview_plan_empty')
+    for idx, row in enumerate(payload):
+        _expect_type(f'interview_plan_item_{idx}', row, (dict,))
+        _expect_keys(row, ['question_id', 'source', 'order', 'stage'])
+    return payload
+
+def validate_score_result(payload: Any) -> dict[str, Any]:
+    _expect_type('score_result', payload, (dict,))
+    _expect_keys(payload, ['coverage', 'score', 'reason', 'suggestion'])
+    _expect_type('score_result_coverage', payload.get('coverage'), (dict,))
+    _expect_type('score_result_score', payload.get('score'), (dict,))
+    _expect_keys(payload['coverage'], ['matched_points', 'missing_points', 'coverage_ratio', 'evidence_ratio'])
+    _expect_keys(payload['score'], ['fluency', 'expression', 'knowledge', 'core_competency', 'case_problem_solving', 'overall'])
+    return payload
+
+def validate_followup_question(payload: Any) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    if payload is False:
+        return None
+    if isinstance(payload, dict) and payload.get('followup_needed') is False:
+        return None
+    _expect_type('followup_question', payload, (dict,))
+    _expect_keys(payload, ['question_id','source','difficulty','topic','question','ideal_answer_points','followup_hints'])
+    return payload

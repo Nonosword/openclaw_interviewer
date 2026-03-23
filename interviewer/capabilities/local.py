@@ -61,24 +61,39 @@ class LocalCapabilities:
         interview_role = self._require_nonempty_text("interview_role", payload.get("interview_role"))
         resume_path = self._resolve_resume_path(self._require_nonempty_text("resume_file", payload.get("resume_file")))
         self._validate_resume_source(resume_path)
+        normalized_resume_file = self._resume_storage_ref(resume_path)
         jd = self._resolve_or_create_jd(
             jd_id=payload.get("jd_id"),
             jd_name=payload.get("jd_name") or interview_role,
             jd_role=payload.get("jd_role") or interview_role,
             jd_text=payload.get("jd_text"),
         )
-        row = CandidateRecord(
-            candidate_id=self._require_nonempty_text("candidate_id", payload.get("candidate_id")),
+        candidate_id = self._require_nonempty_text("candidate_id", payload.get("candidate_id"))
+        existing = next((dict(item) for item in self.load_candidates() if item.get("candidate_id") == candidate_id), {})
+        core_row = CandidateRecord(
+            candidate_id=candidate_id,
             candidate_name=self._require_nonempty_text("candidate_name", payload.get("candidate_name")),
             interview_role=interview_role,
             jd_id=jd["jd_id"],
-            resume_file=self._resume_storage_ref(resume_path),
+            resume_file=normalized_resume_file,
             scheduled_at=self._require_nonempty_text("scheduled_at", payload.get("scheduled_at")),
             resume_profile_file=payload.get("resume_profile_file"),
             question_bank_id=payload.get("question_bank_id"),
             timer_id=payload.get("timer_id"),
             status=payload.get("status", "new"),
         ).to_dict()
+        row = dict(existing)
+        material_changed = any([
+            str(existing.get("candidate_name") or "") != str(core_row.get("candidate_name") or ""),
+            str(existing.get("interview_role") or "") != str(core_row.get("interview_role") or ""),
+            str(existing.get("jd_id") or "") != str(core_row.get("jd_id") or ""),
+            str(existing.get("resume_file") or "") != str(core_row.get("resume_file") or ""),
+            str(existing.get("scheduled_at") or "") != str(core_row.get("scheduled_at") or ""),
+        ])
+        if material_changed:
+            row.pop("latest_interview", None)
+            row["status"] = payload.get("status", "new")
+        row.update(core_row)
         row["enabled"] = payload.get("enabled", True)
         self.storage.rewrite_jsonl_by_key(self.storage.candidates_path, "candidate_id", row["candidate_id"], row)
         self.storage.update_manifest("candidate_index", {"count": len(self.load_candidates())})
@@ -104,7 +119,8 @@ class LocalCapabilities:
         row["question_bank_id"] = f"{jd['jd_id']}.questions"
         row["resume_profile_file"] = f"data/{self._resume_artifact_key(row['resume_file'])}.profile.json"
         row["timer_id"] = timer["timer_id"]
-        row["status"] = "ready"
+        if not row.get("latest_interview"):
+            row["status"] = "ready"
         self.candidate_upsert(row)
         return {
             "candidate_id": row["candidate_id"],
@@ -220,9 +236,10 @@ class LocalCapabilities:
             }
             self.storage.save_json(profile_error_sidecar, failure)
             raise ValueError("resume_profile_build_failed", failure) from exc
+        questions = self.resume_generate_questions(profile, role_name, jd_text)
+        profile["resume_question_bank_ref"] = f"data/{artifact_key}.questions.jsonl"
         self.storage.save_json(self.storage.resume_data_dir / f"{artifact_key}.profile.json", profile)
         self._clear_sidecar(profile_error_sidecar)
-        questions = self.resume_generate_questions(profile, role_name, jd_text)
         fit_score = ((profile.get("job_fit") or {}).get("fit_score") or 0)
         return {
             "resume_profile_file": f"data/{artifact_key}.profile.json",
@@ -268,9 +285,107 @@ class LocalCapabilities:
         self.storage.save_runtime(session_id, payload)
         return {"session_id": session_id, "saved": True}
 
-    def evaluation_score_answer(self, question: dict[str, Any], reply_text: str, candidate_id: str, started_at: str | None, max_question_seconds: int, evidence: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def interview_build_plan(self, candidate: dict[str, Any], domain_count: int, resume_count: int) -> dict[str, Any]:
+        jd = self._get_jd(self._require_nonempty_text('jd_id', candidate.get('jd_id')))
+        resume_profile_file = self._require_nonempty_text('resume_profile_file', candidate.get('resume_profile_file'))
+        resume_profile = self.storage.load_json(self.storage.resume_data_dir / Path(resume_profile_file).name)
+        if not resume_profile:
+            raise ValueError('resume_profile_missing')
+        domain_questions = self.storage.read_jsonl(self.storage.domain_q_dir / f"{jd['jd_id']}.questions.jsonl")
+        if not domain_questions:
+            raise ValueError('domain_question_bank_missing')
+        resume_artifact_key = self._resume_artifact_key(str(resume_profile.get('resume_file') or candidate.get('resume_file') or ''))
+        resume_question_ref = f'data/{resume_artifact_key}.questions.jsonl'
+        resume_questions = self.storage.read_jsonl(self.storage.resume_data_dir / f"{resume_artifact_key}.questions.jsonl")
+        if not resume_questions:
+            raise ValueError('resume_question_bank_missing')
+        plan_items = self.subagents.build_interview_plan(
+            candidate.get('candidate_name'),
+            candidate['interview_role'],
+            jd['jd_text'],
+            resume_profile,
+            domain_questions,
+            resume_questions,
+            domain_count=domain_count,
+            resume_count=resume_count,
+        )
+        bank = {
+            ('domain', str(row.get('question_id'))): dict(row) for row in domain_questions
+        }
+        bank.update({
+            ('resume', str(row.get('question_id'))): dict(row) for row in resume_questions
+        })
+        ordered_questions: list[dict[str, Any]] = []
+        for item in sorted(plan_items, key=lambda row: int(row.get('order') or 0)):
+            key = (str(item.get('source') or ''), str(item.get('question_id') or ''))
+            if key not in bank:
+                raise ValueError('interview_plan_question_not_found')
+            question = dict(bank[key])
+            question['source'] = item['source']
+            question['stage'] = item['stage']
+            ordered_questions.append(question)
+        return {'items': ordered_questions, 'resume_profile': resume_profile, 'jd': jd}
+
+    def evaluation_score_answer(
+        self,
+        question: dict[str, Any],
+        reply_text: str,
+        candidate_id: str,
+        started_at: str | None,
+        max_question_seconds: int,
+        *,
+        role_name: str,
+        jd_text: str,
+        resume_profile: dict[str, Any] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        history: list[dict[str, Any]] | None = None,
+        received_at: str | None = None,
+    ) -> dict[str, Any]:
         from interviewer.capabilities.scoring import score_answer
-        return score_answer(question, reply_text, candidate_id, started_at, max_question_seconds, evidence or [])
+        return score_answer(
+            question,
+            reply_text,
+            candidate_id,
+            started_at,
+            max_question_seconds,
+            role_name=role_name,
+            jd_text=jd_text,
+            dispatcher=self.subagents,
+            root=self.root,
+            resume_profile=resume_profile,
+            evidence=evidence or [],
+            history=history or [],
+            received_at=received_at,
+        )
+
+    def followup_generate(
+        self,
+        *,
+        question: dict[str, Any],
+        reply_text: str,
+        score_result: dict[str, Any],
+        role_name: str,
+        jd_text: str,
+        resume_profile: dict[str, Any] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        history: list[dict[str, Any]] | None = None,
+        total_count: int,
+        chain_count: int,
+    ) -> dict[str, Any] | None:
+        return self.subagents.build_followup_question(
+            question=question,
+            reply_text=reply_text,
+            score_result=score_result,
+            role_name=role_name,
+            jd_text=jd_text,
+            resume_profile=resume_profile,
+            evidence=evidence or [],
+            history=history or [],
+            total_count=total_count,
+            chain_count=chain_count,
+            max_total=int(self.defaults.get('max_followups_total', 5)),
+            max_chain=int(self.defaults.get('max_followups_chain', 2)),
+        )
 
     def case_generate(self, role_name: str, jd_text: str, resume_profile: dict[str, Any], history: list[dict[str, Any]], knowledge_id: str | None, weak_topics: list[str] | None = None) -> dict[str, Any]:
         return self.subagents.build_case_question(role_name, jd_text, resume_profile, history, knowledge_id, weak_topics or [])
@@ -278,6 +393,15 @@ class LocalCapabilities:
     def interview_record_write(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.storage.append_jsonl(self.storage.interview_records_path, payload)
         return {"written": True, "candidate_id": payload.get("candidate_id")}
+
+    def candidate_attach_interview_summary(self, candidate_id: str, interview_summary: dict[str, Any]) -> dict[str, Any]:
+        row = next((dict(item) for item in self.load_candidates() if item.get('candidate_id') == candidate_id), None)
+        if row is None:
+            raise ValueError('candidate_not_found')
+        row['latest_interview'] = interview_summary
+        row['status'] = 'interview_completed'
+        self.storage.rewrite_jsonl_by_key(self.storage.candidates_path, 'candidate_id', candidate_id, row)
+        return {'updated': True, 'candidate_id': candidate_id}
 
     def event_write(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.storage.log_event(event_type, payload)

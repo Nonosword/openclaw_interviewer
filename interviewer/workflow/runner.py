@@ -50,9 +50,12 @@ class WorkflowRunner:
         self.registry.register('retrieval.inspect', self.cap.retrieval_inspect)
         self.registry.register('runtime.load', self.cap.runtime_load)
         self.registry.register('runtime.save', self.cap.runtime_save, side_effect=True)
+        self.registry.register('interview.plan', self.cap.interview_build_plan)
         self.registry.register('evaluation.score_answer', self.cap.evaluation_score_answer)
+        self.registry.register('followup.generate', self.cap.followup_generate)
         self.registry.register('case.generate', self.cap.case_generate)
         self.registry.register('interview.record_write', self.cap.interview_record_write, side_effect=True)
+        self.registry.register('candidate.attach_interview_summary', self.cap.candidate_attach_interview_summary, side_effect=True)
         self.registry.register('event.write', self.cap.event_write, side_effect=True)
         self.registry.register('audit.write', self.cap.audit_write, side_effect=True)
 
@@ -216,6 +219,8 @@ class WorkflowRunner:
         runtime.queue = self.steps.build_initial_queue(runtime, candidate)
         runtime.state = 'INTERVIEW_STARTED'
         runtime.interview_started_at = datetime.now().astimezone().isoformat()
+        runtime.case_question_count = 0
+        runtime.completed_case = False
         self.registry.execute('runtime.save', session_id=session_id, payload=runtime.to_dict())
         self.step_recorder.record('interview_start', 'start_interview', state_before='CANDIDATE_IDENTIFIED', state_after=runtime.state, session_id=session_id, queue_size=len(runtime.queue))
         self.registry.execute('event.write', event_type='interview_started', payload={'session_id': session_id, 'candidate_id': runtime.candidate_id})
@@ -224,7 +229,7 @@ class WorkflowRunner:
     def interview_status(self, session_id: str) -> dict[str, Any]:
         runtime = self._load_runtime(session_id)
         pending = [q for q in runtime.queue if not q.get('asked')]
-        return {'session_id': session_id, 'state': runtime.state, 'candidate_id': runtime.candidate_id, 'current_question_id': runtime.current_question_id, 'pending_count': len(pending), 'followup_total_count': runtime.followup_total_count, 'followup_chain_count': runtime.followup_chain_count, 'completed_case': runtime.completed_case}
+        return {'session_id': session_id, 'state': runtime.state, 'candidate_id': runtime.candidate_id, 'current_question_id': runtime.current_question_id, 'pending_count': len(pending), 'followup_total_count': runtime.followup_total_count, 'followup_chain_count': runtime.followup_chain_count, 'completed_case': runtime.completed_case, 'case_question_count': runtime.case_question_count, 'plan_summary': runtime.plan_summary}
 
     def interview_next(self, session_id: str) -> dict[str, Any]:
         runtime = self._load_runtime(session_id)
@@ -234,7 +239,7 @@ class WorkflowRunner:
                 return {'question_id': current['question_id'], 'visible_message': self.comm.ask_question(current['question']), 'state': runtime.state, 'repeated': True}
         pending_selected = self.steps.select_next_question(runtime)
         if not pending_selected:
-            if not runtime.completed_case:
+            if runtime.case_question_count < int(self.defaults['initial_case_question_count']):
                 return self.interview_case_generate(session_id)
             return self.interview_finish(session_id)
         q = pending_selected
@@ -256,14 +261,23 @@ class WorkflowRunner:
         question = self._find_question(runtime, runtime.current_question_id)
         question['answer_count'] = int(question.get('answer_count', 0)) + 1
         score = self.steps.score_answer(runtime, question, candidate_message)
+        score['session_id'] = session_id
         self.cap.storage.append_jsonl(self.cap.storage.score_records_path, score)
+        question['_latest_matched_points'] = score['coverage']['matched_points']
         question['_latest_missing_points'] = score['coverage']['missing_points']
+        question['_latest_coverage_ratio'] = score['coverage']['coverage_ratio']
+        question['_latest_evidence_ratio'] = score['coverage']['evidence_ratio']
         self._replace_question(runtime, question)
         self.registry.execute('event.write', event_type='reply_scored', payload={'session_id': session_id, 'question_id': question['question_id'], 'overall': score['score']['overall']})
         followup = self.steps.maybe_followup(question, candidate_message, runtime, score.get('score', {}).get('overall', 0))
         if followup and question['source'] not in {'case', 'followup'}:
             runtime.followup_total_count += 1
             runtime.followup_chain_count += 1
+            worker_question_id = followup.get('question_id')
+            followup['builder_question_id'] = worker_question_id
+            followup['source'] = 'followup'
+            followup['question_id'] = new_id('fq')
+            followup['source_question_id'] = question['question_id']
             followup['asked'] = True
             runtime.current_question_id = followup['question_id']
             runtime.question_started_at = datetime.now().astimezone().isoformat()
@@ -285,15 +299,18 @@ class WorkflowRunner:
         runtime = self._load_runtime(session_id)
         candidate = self._load_candidate(runtime.candidate_id)
         case_q = self.steps.generate_case(runtime, candidate)
+        worker_question_id = case_q.get('question_id')
         case_q.setdefault('source', 'case')
         case_q.setdefault('difficulty', 'hard')
         case_q.setdefault('topic', 'case_final')
-        case_q.setdefault('question_id', new_id('case'))
+        case_q['builder_question_id'] = worker_question_id
+        case_q['question_id'] = new_id('case')
         case_q.setdefault('order', max([q['order'] for q in runtime.queue], default=0) + 1)
         case_q['asked'] = True
         runtime.queue.append(case_q)
         runtime.current_question_id = case_q['question_id']
-        runtime.completed_case = True
+        runtime.case_question_count = int(runtime.case_question_count or 0) + 1
+        runtime.completed_case = runtime.case_question_count >= int(self.defaults['initial_case_question_count'])
         runtime.question_started_at = datetime.now().astimezone().isoformat()
         runtime.state = 'WAITING_FOR_REPLY'
         self.registry.execute('runtime.save', session_id=session_id, payload=runtime.to_dict())
@@ -302,15 +319,38 @@ class WorkflowRunner:
 
     def interview_finish(self, session_id: str) -> dict[str, Any]:
         runtime = self._load_runtime(session_id)
-        history = [row for row in self.cap.storage.read_jsonl(self.cap.storage.score_records_path) if row['candidate_id'] == runtime.candidate_id]
+        history = self._session_history(session_id)
         final_meta = self.steps.finalize(runtime, history)
         final_score = final_meta['final_score']
-        transcript = []
+        candidate = self._load_candidate(runtime.candidate_id)
+        finished_at = datetime.now().astimezone().isoformat()
+        questions = []
         for q in sorted(runtime.queue, key=lambda x: x['order']):
             score_row = next((row for row in history if row['question_id'] == q['question_id']), None)
-            transcript.append({'question_id': q['question_id'], 'question': q.get('question'), 'source': q.get('source'), 'difficulty': q.get('difficulty'), 'score': (score_row or {}).get('score'), 'reply_text': (score_row or {}).get('reply_text')})
-        record = {'session_id': session_id, 'candidate_id': runtime.candidate_id, 'candidate_name': runtime.candidate_name, 'jd_id': runtime.knowledge_id, 'resume_profile_file': runtime.resume_profile_file, 'final_score': final_score, 'subscores': final_meta['subscores'], 'transcript': transcript, 'question_count': len(history), 'finished_at': datetime.now().astimezone().isoformat()}
+            questions.append(self._question_summary(q, score_row))
+        record = {
+            'session_id': session_id,
+            'candidate_id': runtime.candidate_id,
+            'candidate_name': runtime.candidate_name,
+            'interview_role': candidate.get('interview_role'),
+            'jd_id': runtime.knowledge_id,
+            'resume_profile_file': runtime.resume_profile_file,
+            'scheduled_at': runtime.scheduled_at,
+            'interview_started_at': runtime.interview_started_at,
+            'finished_at': finished_at,
+            'status': 'completed',
+            'plan_summary': runtime.plan_summary,
+            'question_count': len(history),
+            'counts_by_type': self._question_type_counts(questions),
+            'followup_total_count': runtime.followup_total_count,
+            'case_question_count': runtime.case_question_count,
+            'final_score': final_score,
+            'subscores': final_meta['subscores'],
+            'questions': questions,
+            'transcript': questions,
+        }
         self.registry.execute('interview.record_write', payload=record)
+        self.registry.execute('candidate.attach_interview_summary', candidate_id=runtime.candidate_id, interview_summary=record)
         runtime.state = 'COMPLETED'
         self.step_recorder.record('interview_finalize', 'persist_record', state_before='FINAL_EVALUATING', state_after=runtime.state, session_id=session_id, question_count=len(history), final_score=final_score)
         self.registry.execute('runtime.save', session_id=session_id, payload=runtime.to_dict())
@@ -364,23 +404,6 @@ class WorkflowRunner:
                 inserted = True
         return sorted(out, key=lambda x: x['order'])
 
-    def _maybe_build_followup(self, question: dict[str, Any], reply_text: str, total_count: int, chain_count: int, latest_overall: float, answer_count: int) -> dict[str, Any] | None:
-        if total_count >= self.defaults['max_followups_total'] or chain_count >= self.defaults['max_followups_chain']:
-            return None
-        if answer_count > 1:
-            return None
-        if question.get('source') in {'followup', 'case'}:
-            return None
-        missing = list(question.get('_latest_missing_points') or [])
-        if missing and float(latest_overall or 0) < 7.6:
-            prompt = missing[0]
-            return {'question_id': new_id('fq'), 'source': 'followup', 'source_question_id': question['question_id'], 'difficulty': question.get('difficulty', 'medium'), 'topic': question.get('topic', 'followup'), 'question': f'你刚才提到的内容还不够完整。请继续补充：{prompt}', 'ideal_answer_points': [prompt], 'evidence_refs': question.get('evidence_refs', []), 'answer_count': 0}
-        text = str(reply_text or '')
-        has_case_signal = any(token in text for token in ['项目', '线上', '日志', '监控', '优化'])
-        if has_case_signal and len(text) < 80 and float(latest_overall or 0) < 7.2:
-            return {'question_id': new_id('fq'), 'source': 'followup', 'source_question_id': question['question_id'], 'difficulty': question.get('difficulty', 'medium'), 'topic': question.get('topic', 'followup'), 'question': '请结合一个真实案例，把你的判断过程、验证方式和结果说得更具体一些。', 'ideal_answer_points': ['背景', '动作', '验证', '结果'], 'evidence_refs': question.get('evidence_refs', []), 'answer_count': 0}
-        return None
-
     def _subscores(self, history: list[dict[str, Any]]) -> dict[str, float]:
         def avg(rows):
             return round(sum(float((r.get('score') or {}).get('overall') or 0) for r in rows) / max(len(rows), 1), 2)
@@ -410,3 +433,45 @@ class WorkflowRunner:
         row['status'] = 'resume_parse_failed' if str(error_code).startswith('resume_') else 'init_failed'
         self.cap.storage.rewrite_jsonl_by_key(self.cap.storage.candidates_path, 'candidate_id', candidate_id, row)
         return self._load_candidate(candidate_id)
+
+    def _session_history(self, session_id: str) -> list[dict[str, Any]]:
+        return [
+            row for row in self.cap.storage.read_jsonl(self.cap.storage.score_records_path)
+            if row.get('session_id') == session_id
+        ]
+
+    def _question_summary(self, question: dict[str, Any], score_row: dict[str, Any] | None) -> dict[str, Any]:
+        score_row = score_row or {}
+        source = str(question.get('source') or '')
+        return {
+            'question_id': question.get('question_id'),
+            'order': question.get('order'),
+            'stage': question.get('stage'),
+            'source': source,
+            'type': 'knowledge' if source == 'domain' else source,
+            'source_question_id': question.get('source_question_id'),
+            'topic': question.get('topic'),
+            'difficulty': question.get('difficulty'),
+            'question': question.get('question'),
+            'scoring_focus': question.get('scoring_focus', []),
+            'ideal_answer_points': question.get('ideal_answer_points', []),
+            'followup_hints': question.get('followup_hints', []),
+            'candidate_answer': score_row.get('reply_text'),
+            'model_score': score_row.get('score'),
+            'overall_score': ((score_row.get('score') or {}).get('overall')),
+            'evaluation': {
+                'reason': score_row.get('reason'),
+                'suggestion': score_row.get('suggestion'),
+                'coverage': score_row.get('coverage'),
+                'timing': score_row.get('timing'),
+            },
+            'evidence_refs': question.get('evidence_refs', []),
+        }
+
+    def _question_type_counts(self, questions: list[dict[str, Any]]) -> dict[str, int]:
+        counts = {'knowledge': 0, 'resume': 0, 'followup': 0, 'case': 0}
+        for row in questions:
+            qtype = str(row.get('type') or '')
+            if qtype in counts:
+                counts[qtype] += 1
+        return counts

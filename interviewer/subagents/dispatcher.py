@@ -131,6 +131,145 @@ class LocalSubagentDispatcher:
         )
         return schemas.validate_question_bank(questions)
 
+    def build_interview_plan(
+        self,
+        candidate_name: str | None,
+        role_name: str,
+        jd_text: str,
+        resume_profile: dict[str, Any],
+        domain_questions: list[dict[str, Any]],
+        resume_questions: list[dict[str, Any]],
+        *,
+        domain_count: int,
+        resume_count: int,
+    ) -> list[dict[str, Any]]:
+        payload = {
+            'candidate_name': candidate_name,
+            'role_name': role_name,
+            'jd_text': jd_text,
+            'resume_profile': resume_profile,
+            'domain_questions': domain_questions,
+            'resume_questions': resume_questions,
+            'domain_count': domain_count,
+            'resume_count': resume_count,
+        }
+        response = self._invoke_json_worker(
+            worker_name='question_generator',
+            task_name='build_interview_plan',
+            payload=payload,
+            instructions=(
+                '基于已有 domain question bank 与 resume question bank，为单个候选人生成 interview plan。'
+                '输出一个 JSON array，每项必须包含 question_id、source、order、stage。'
+                '必须恰好选择 domain_count 道 domain 题和 resume_count 道 resume 题。'
+                '顺序要求是先做 domain 覆盖检查，再做 resume 贴合追问；order 从 1 开始连续递增；stage 只能写 domain_screening 或 resume_probe。'
+                '只允许从输入题库中挑题，不要新造题。'
+                '题目要覆盖不同难度和不同 topic，避免同 topic 重复。'
+            ),
+        )
+        plan = schemas.validate_interview_plan(response)
+        self._validate_interview_plan_constraints(
+            plan,
+            domain_questions=domain_questions,
+            resume_questions=resume_questions,
+            domain_count=domain_count,
+            resume_count=resume_count,
+        )
+        return plan
+
+    def evaluate_answer(
+        self,
+        *,
+        question: dict[str, Any],
+        reply_text: str,
+        candidate_id: str,
+        role_name: str,
+        jd_text: str,
+        resume_profile: dict[str, Any] | None,
+        evidence: list[dict[str, Any]],
+        history: list[dict[str, Any]],
+        started_at: str | None,
+        received_at: str | None,
+        response_seconds: int | None,
+        max_question_seconds: int,
+    ) -> dict[str, Any]:
+        payload = {
+            'question': question,
+            'reply_text': reply_text,
+            'candidate_id': candidate_id,
+            'role_name': role_name,
+            'jd_text': jd_text,
+            'resume_profile': resume_profile or {},
+            'evidence': evidence,
+            'history': history,
+            'timing': {
+                'question_started_at': started_at,
+                'reply_received_at': received_at,
+                'response_seconds': response_seconds,
+                'max_question_seconds': max_question_seconds,
+            },
+        }
+        response = self._invoke_json_worker(
+            worker_name='evaluator',
+            task_name='evaluate_answer',
+            payload=payload,
+            instructions=(
+                '你在做结构化面试评分。'
+                '只基于题目、候选人回答、JD、简历画像、证据片段、历史回答和 timing 信息评分。'
+                '输出一个 JSON object，必须包含 coverage、score、reason、suggestion。'
+                'coverage 必须包含 matched_points、missing_points、coverage_ratio、evidence_ratio。'
+                'score 必须包含 fluency、expression、knowledge、core_competency、case_problem_solving、overall，全部用 0-10 的数值。'
+                'timing 主要用于解释回答节奏和时效性，不要自行额外做固定公式扣分。'
+                'reason 和 suggestion 必须简洁、具体，不要输出 markdown。'
+                '若回答没有覆盖题目关键点，要在 missing_points 中明确指出。'
+            ),
+        )
+        return schemas.validate_score_result(response)
+
+    def build_followup_question(
+        self,
+        *,
+        question: dict[str, Any],
+        reply_text: str,
+        score_result: dict[str, Any],
+        role_name: str,
+        jd_text: str,
+        resume_profile: dict[str, Any] | None,
+        evidence: list[dict[str, Any]],
+        history: list[dict[str, Any]],
+        total_count: int,
+        chain_count: int,
+        max_total: int,
+        max_chain: int,
+    ) -> dict[str, Any] | None:
+        payload = {
+            'question': question,
+            'reply_text': reply_text,
+            'score_result': score_result,
+            'role_name': role_name,
+            'jd_text': jd_text,
+            'resume_profile': resume_profile or {},
+            'evidence': evidence,
+            'history': history,
+            'total_count': total_count,
+            'chain_count': chain_count,
+            'max_total': max_total,
+            'max_chain': max_chain,
+        }
+        response = self._invoke_json_worker(
+            worker_name='question_generator',
+            task_name='build_followup_question',
+            payload=payload,
+            instructions=(
+                '判断当前回答是否值得追问；如果不需要追问，直接返回 {"followup_needed": false}。'
+                '如果需要追问，输出一个 JSON object，字段必须包含 question_id、source、difficulty、topic、question、ideal_answer_points、followup_hints、evidence_refs。'
+                'source 固定为 followup。'
+                '只有在回答存在明显缺口、证据不足、逻辑跳跃或与岗位要求脱节时才追问。'
+                '追问必须紧贴刚才那道题与候选人回答，不要改成全新主问题。'
+                '每次只允许生成 1 道追问。'
+            ),
+        )
+        return schemas.validate_followup_question(response)
+
     def build_case_question(self, role_name: str, jd_text: str, resume_profile: dict[str, Any], history: list[dict[str, Any]], knowledge_id: str | None, weak_topics: list[str] | None = None) -> dict[str, Any]:
         payload = {
             'role_name': role_name,
@@ -192,6 +331,56 @@ class LocalSubagentDispatcher:
             if not key or key in seen:
                 raise ValueError('question_bank_has_duplicates')
             seen.add(key)
+
+    def _validate_interview_plan_constraints(
+        self,
+        plan: list[dict[str, Any]],
+        *,
+        domain_questions: list[dict[str, Any]],
+        resume_questions: list[dict[str, Any]],
+        domain_count: int,
+        resume_count: int,
+    ) -> None:
+        expected_total = int(domain_count) + int(resume_count)
+        if len(plan) != expected_total:
+            raise ValueError('interview_plan_count_invalid')
+        domain_ids = {str(row.get('question_id')) for row in domain_questions}
+        resume_ids = {str(row.get('question_id')) for row in resume_questions}
+        seen_ids: set[tuple[str, str]] = set()
+        domain_selected = 0
+        resume_selected = 0
+        expected_orders = list(range(1, expected_total + 1))
+        actual_orders = sorted(int(row.get('order')) for row in plan)
+        if actual_orders != expected_orders:
+            raise ValueError('interview_plan_order_invalid')
+        ordered_plan = sorted(plan, key=lambda row: int(row.get('order') or 0))
+        seen_resume = False
+        for row in ordered_plan:
+            source = str(row.get('source') or '')
+            if source == 'resume':
+                seen_resume = True
+            elif source == 'domain' and seen_resume:
+                raise ValueError('interview_plan_stage_order_invalid')
+        for row in plan:
+            qid = str(row.get('question_id') or '')
+            source = str(row.get('source') or '')
+            stage = str(row.get('stage') or '')
+            key = (source, qid)
+            if not qid or key in seen_ids:
+                raise ValueError('interview_plan_duplicate_question')
+            seen_ids.add(key)
+            if source == 'domain':
+                if qid not in domain_ids or stage != 'domain_screening':
+                    raise ValueError('interview_plan_domain_invalid')
+                domain_selected += 1
+            elif source == 'resume':
+                if qid not in resume_ids or stage != 'resume_probe':
+                    raise ValueError('interview_plan_resume_invalid')
+                resume_selected += 1
+            else:
+                raise ValueError('interview_plan_source_invalid')
+        if domain_selected != int(domain_count) or resume_selected != int(resume_count):
+            raise ValueError('interview_plan_distribution_invalid')
 
     def _invoke_json_worker(
         self,

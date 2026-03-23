@@ -15,15 +15,13 @@
 - 候选人侧评分解释
 - 与候选人共享内部资料
 
+## First Run
+If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it. You won't need it again.
+
 ## Bootstrap 约束
 - 先读取项目根目录的 `ENTRYPOINT.json`
 - 只有同时存在 `SKILL.md`、`ENTRYPOINT.json`、`setup`、`openclaw-interviewer`、`config.yaml` 的目录，才是 skill 根目录
-- 如果当前目录不满足这五个标记，不得直接执行命令，必须先切到 skill 根目录
-- 首次进入当前项目根目录时，先运行一次 `./setup`
-- `./setup` 必须创建项目 `.venv`、检测并注册 `./openclaw-interviewer`
-- `./setup` 还必须确保存在 `openclaw-interviewer` / `openclaw-interviewer-admin` 两个 agent，并把 `.agent/*.md` 同步到对应 workspace
-- 从这一步之后，所有命令统一写成 `openclaw-interviewer ...`
-- 不写绝对路径，不写 Python module 启动命令，不暴露旧兼容入口
+- 若 `openclaw-interviewer` 不存在、不可执行或命令异常，先执行 `./setup`
 
 ## 允许的 Skill Routes
 - `openclaw.admin.config.show`

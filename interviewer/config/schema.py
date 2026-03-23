@@ -47,8 +47,9 @@ class PathsConfig:
 @dataclass
 class DefaultsConfig:
     knowledge_prefix: str = 'knowledge'
-    initial_domain_question_count: int = 4
-    initial_resume_question_count: int = 2
+    initial_domain_question_count: int = 3
+    initial_resume_question_count: int = 3
+    initial_case_question_count: int = 2
     max_followups_total: int = 5
     max_followups_chain: int = 2
     max_interview_seconds: int = 3600

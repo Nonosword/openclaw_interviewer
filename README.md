@@ -64,8 +64,8 @@ agent 不应先猜命令，而应先找 skill 根目录。
 - 初始化默认配置
 - 在项目根目录创建 `.venv`，后续统一用它执行 `openclaw-interviewer`
 - 检查并注册两个 OpenClaw agent：
-  `openclaw-interviewer` -> `~/.openclaw/workspace_interviewer/candidate`
-  `openclaw-interviewer-admin` -> `~/.openclaw/workspace_interviewer/admin`
+  `openclaw agents add openclaw-interviewer --workspace ~/.openclaw/workspace_interviewer/candidate`
+  `openclaw agents add openclaw-interviewer-admin --workspace ~/.openclaw/workspace_interviewer/admin`
 - 将项目内 `.agent/admin/*.md` 与 `.agent/candidate/*.md` 同步到各自 workspace
 - 检测并修复当前项目根目录的 `./openclaw-interviewer`
 - 运行一次 `doctor` 并给出后续建议命令

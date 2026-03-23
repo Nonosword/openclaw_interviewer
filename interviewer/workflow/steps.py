@@ -54,13 +54,19 @@ class InterviewStepHandlers:
         self.runner = runner
 
     def build_initial_queue(self, runtime: InterviewRuntime, candidate: dict[str, Any]) -> list[dict[str, Any]]:
-        queue_seed = self.runner.retrieval.select_initial_questions(
-            jd_id=candidate['jd_id'],
-            resume_file=candidate['resume_file'],
-            question_distribution=self.runner.defaults['question_distribution'],
+        plan = self.runner.registry.execute(
+            'interview.plan',
+            candidate=candidate,
+            domain_count=self.runner.defaults['initial_domain_question_count'],
             resume_count=self.runner.defaults['initial_resume_question_count'],
         )
-        queue = self.runner._build_initial_queue(queue_seed)
+        queue = self.runner._build_initial_queue(plan['items'])
+        runtime.plan_summary = {
+            'domain_count': self.runner.defaults['initial_domain_question_count'],
+            'resume_count': self.runner.defaults['initial_resume_question_count'],
+            'case_count': self.runner.defaults['initial_case_question_count'],
+            'queue_size': len(queue),
+        }
         self.runner.step_recorder.record(
             'interview_start',
             'build_initial_queue',
@@ -86,11 +92,16 @@ class InterviewStepHandlers:
         return selected
 
     def score_answer(self, runtime: InterviewRuntime, question: dict[str, Any], candidate_message: str) -> dict[str, Any]:
+        candidate = self.runner._load_candidate(runtime.candidate_id)
+        jd = self.runner.cap.jd_lookup(candidate['jd_id'])
+        resume_profile = None
         evidence: list[dict[str, Any]] = []
         if runtime.knowledge_id:
             evidence.extend(self.runner.retrieval.retrieve_domain_evidence(jd_id=runtime.knowledge_id, query=question.get('question', '')))
         if runtime.resume_profile_file:
+            resume_profile = self.runner.retrieval.load_resume_profile(runtime.resume_profile_file)
             evidence.extend(self.runner.retrieval.retrieve_resume_evidence(runtime.resume_profile_file, question.get('question', '')))
+        history = self.runner._session_history(runtime.session_id)
         score = self.runner.registry.execute(
             'evaluation.score_answer',
             question=question,
@@ -98,7 +109,11 @@ class InterviewStepHandlers:
             candidate_id=runtime.candidate_id or 'unknown',
             started_at=runtime.question_started_at,
             max_question_seconds=runtime.max_question_seconds,
+            role_name=candidate['interview_role'],
+            jd_text=jd['jd_text'],
+            resume_profile=resume_profile,
             evidence=evidence,
+            history=history,
         )
         self.runner.step_recorder.record(
             'interview_round',
@@ -113,13 +128,42 @@ class InterviewStepHandlers:
         return score
 
     def maybe_followup(self, question: dict[str, Any], reply_text: str, runtime: InterviewRuntime, latest_overall: float) -> dict[str, Any] | None:
-        followup = self.runner._maybe_build_followup(
-            question,
-            reply_text,
-            runtime.followup_total_count,
-            runtime.followup_chain_count,
-            latest_overall,
-            question.get('answer_count', 1),
+        if runtime.followup_total_count >= int(self.runner.defaults['max_followups_total']):
+            return None
+        if runtime.followup_chain_count >= int(self.runner.defaults['max_followups_chain']):
+            return None
+        if question.get('answer_count', 1) > 1 or question.get('source') in {'followup', 'case'}:
+            return None
+        candidate = self.runner._load_candidate(runtime.candidate_id)
+        jd = self.runner.cap.jd_lookup(candidate['jd_id'])
+        resume_profile = None
+        evidence: list[dict[str, Any]] = []
+        if runtime.knowledge_id:
+            evidence.extend(self.runner.retrieval.retrieve_domain_evidence(jd_id=runtime.knowledge_id, query=question.get('question', '')))
+        if runtime.resume_profile_file:
+            resume_profile = self.runner.retrieval.load_resume_profile(runtime.resume_profile_file)
+            evidence.extend(self.runner.retrieval.retrieve_resume_evidence(runtime.resume_profile_file, question.get('question', '')))
+        history = self.runner._session_history(runtime.session_id)
+        followup = self.runner.registry.execute(
+            'followup.generate',
+            question=question,
+            reply_text=reply_text,
+            score_result={
+                'coverage': {
+                    'matched_points': question.get('_latest_matched_points', []),
+                    'missing_points': question.get('_latest_missing_points', []),
+                    'coverage_ratio': question.get('_latest_coverage_ratio', 0),
+                    'evidence_ratio': question.get('_latest_evidence_ratio', 0),
+                },
+                'score': {'overall': latest_overall},
+            },
+            role_name=candidate['interview_role'],
+            jd_text=jd['jd_text'],
+            resume_profile=resume_profile,
+            evidence=evidence,
+            history=history,
+            total_count=runtime.followup_total_count,
+            chain_count=runtime.followup_chain_count,
         )
         self.runner.step_recorder.record(
             'interview_round',
@@ -134,7 +178,7 @@ class InterviewStepHandlers:
 
     def generate_case(self, runtime: InterviewRuntime, candidate: dict[str, Any]) -> dict[str, Any]:
         resume_profile = self.runner.retrieval.load_resume_profile(candidate['resume_profile_file'])
-        history = [row for row in self.runner.cap.storage.read_jsonl(self.runner.cap.storage.score_records_path) if row['candidate_id'] == runtime.candidate_id]
+        history = self.runner._session_history(runtime.session_id)
         weak_topics = self.runner.retrieval.summarize_weak_topics(history)
         jd = self.runner.cap.jd_lookup(candidate['jd_id'])
         case_q = self.runner.registry.execute(
