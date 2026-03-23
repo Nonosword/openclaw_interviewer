@@ -11,6 +11,7 @@ openclaw-interviewer doctor
 ```
 
 之后所有 skill 操作都统一写成 `openclaw-interviewer ...`。
+`./setup` 会同时创建项目 `.venv`、注册 `openclaw-interviewer` / `openclaw-interviewer-admin` 两个 agent，并同步 `.agent/*.md` 到各自 workspace。
 
 ## 0.1 创建候选人的硬约束
 执行新增前必须已经拿到：

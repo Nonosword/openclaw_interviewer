@@ -14,13 +14,15 @@
 3. 确认当前目录同时包含 `SKILL.md`、`ENTRYPOINT.json`、`setup`、`openclaw-interviewer`、`config.yaml`
 4. 若不满足，先切换到真正的 skill 根目录
 5. 在 skill 根目录运行 `./setup`
-6. 确认 `./openclaw-interviewer` 已被创建或修复
-7. 运行 `openclaw-interviewer doctor`
-8. 之后优先执行：
+6. 确认项目 `.venv` 已创建
+7. 确认 `openclaw-interviewer-admin` 与 `openclaw-interviewer` agent 已就绪，且 workspace 中的 `*.md` 已同步
+8. 确认 `./openclaw-interviewer` 已被创建或修复
+9. 运行 `openclaw-interviewer doctor`
+10. 之后优先执行：
    - `openclaw-interviewer admin capabilities-list`
    - `openclaw-interviewer admin candidate-list`
    - `openclaw-interviewer admin candidate-initialize`
-9. 测试时可运行：
+11. 测试时可运行：
    - `openclaw-interviewer harness --scenario admin_ops`
    - `openclaw-interviewer harness --scenario full_interview`
 

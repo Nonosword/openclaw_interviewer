@@ -15,9 +15,10 @@
 4. 确认当前目录同时包含 `SKILL.md`、`ENTRYPOINT.json`、`setup`、`openclaw-interviewer`、`config.yaml`
 5. 若不满足，先切换到真正的 skill 根目录
 6. 确认管理员已在当前 skill 根目录运行过 `./setup`
-7. 若未识别候选人，先使用：
+7. 确认项目 `.venv` 已创建，且 candidate workspace 中的 bootstrap 文档已经同步
+8. 若未识别候选人，先使用：
    - `openclaw-interviewer interview identify ...`
-8. 之后只使用 `openclaw-interviewer interview ...` 进入后续 workflow
+9. 之后只使用 `openclaw-interviewer interview ...` 进入后续 workflow
 
 ## 禁止
 - 不运行 `./setup`

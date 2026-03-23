@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +72,7 @@ class LocalCapabilities:
             candidate_name=self._require_nonempty_text("candidate_name", payload.get("candidate_name")),
             interview_role=interview_role,
             jd_id=jd["jd_id"],
-            resume_file=str(resume_path),
+            resume_file=self._resume_storage_ref(resume_path),
             scheduled_at=self._require_nonempty_text("scheduled_at", payload.get("scheduled_at")),
             resume_profile_file=payload.get("resume_profile_file"),
             question_bank_id=payload.get("question_bank_id"),
@@ -154,6 +156,7 @@ class LocalCapabilities:
         txt_sidecar = file_path if file_path.suffix.lower() in {".txt", ".md"} else Path(f"{file_path}.txt")
         extract_sidecar = self.storage.resume_data_dir / f"{artifact_key}.extract.json"
         error_sidecar = self.storage.resume_data_dir / f"{artifact_key}.extract.error.json"
+        dependency_install_attempt = None
         self._validate_resume_source(file_path)
         if txt_sidecar.exists():
             text = txt_sidecar.read_text(encoding="utf-8")
@@ -170,20 +173,13 @@ class LocalCapabilities:
             if text:
                 return {"resume_file": resume_file, "text": text, "engine": saved.get("engine", "sidecar_extract"), "chars": len(text)}
         attempts: list[dict[str, Any]] = []
-        engine = "none"
-        text = ""
-        for candidate_engine, extractor in [
-            ("pdfplumber", self._extract_text_with_pdfplumber),
-            ("pypdf", self._extract_text_with_pypdf),
-            ("pdfminer_python_fallback", self._extract_text_with_pdfminer),
-        ]:
-            extracted = self._attempt_resume_extraction(candidate_engine, extractor, file_path, attempts)
-            if extracted:
-                engine = candidate_engine
-                text = extracted
-                break
+        engine, text = self._extract_resume_text(file_path, attempts)
+        if not text and self._has_missing_dependency(attempts):
+            dependency_install_attempt = self._repair_pdf_dependencies()
+            if dependency_install_attempt.get("ok"):
+                engine, text = self._extract_resume_text(file_path, attempts)
         if not text:
-            primary_failure = self._summarize_resume_extract_failure(attempts)
+            primary_failure = self._summarize_resume_extract_failure(attempts, dependency_install_attempt)
             failure = {
                 "resume_file": resume_file,
                 "parse_stage": "extract_text",
@@ -191,7 +187,8 @@ class LocalCapabilities:
                 "primary_failure_engine": primary_failure.get("engine"),
                 "primary_failure_detail": primary_failure.get("detail"),
                 "attempted_engines": attempts,
-                "admin_message": self._format_resume_extract_admin_message(resume_file, attempts, primary_failure),
+                "dependency_install_attempt": dependency_install_attempt,
+                "admin_message": self._format_resume_extract_admin_message(resume_file, attempts, primary_failure, dependency_install_attempt),
                 "recommended_actions": [
                     "重新上传简历文件",
                     "执行 openclaw-interviewer admin candidate-refresh --candidate-id <candidate_id>",
@@ -359,6 +356,9 @@ class LocalCapabilities:
             normalized["jd_id"] = jd["jd_id"]
         normalized.setdefault("question_bank_id", f"{normalized['jd_id']}.questions")
         normalized.setdefault("enabled", True)
+        resume_file = str(normalized.get("resume_file") or "").strip()
+        if resume_file:
+            normalized["resume_file"] = self._normalize_resume_reference(resume_file)
         resume_profile_file = str(normalized.get("resume_profile_file") or "").strip()
         if resume_profile_file and not resume_profile_file.startswith("data/"):
             normalized["resume_profile_file"] = f"data/{self._resume_artifact_key(normalized['resume_file'])}.profile.json"
@@ -451,7 +451,7 @@ class LocalCapabilities:
         return f"{base_id}_{idx}"
 
     def _resume_artifact_key(self, resume_file: str) -> str:
-        return str(resume_file).replace("\\", "/").replace("/", "__").replace(":", "_")
+        return self._normalize_resume_reference(resume_file).replace("\\", "/").replace("/", "__").replace(":", "_")
 
     def _resolve_resume_path(self, resume_file: str) -> Path:
         raw = Path(resume_file).expanduser()
@@ -492,6 +492,25 @@ class LocalCapabilities:
             raise ValueError(f"missing_{field}")
         return text
 
+    def _resume_storage_ref(self, path: Path) -> str:
+        resolved = path.resolve()
+        try:
+            return str(resolved.relative_to(self.storage.resume_dir.resolve())).replace("\\", "/")
+        except ValueError:
+            return str(resolved)
+
+    def _normalize_resume_reference(self, resume_file: str) -> str:
+        raw = str(resume_file or "").strip()
+        if not raw:
+            return raw
+        path = Path(raw).expanduser()
+        if path.is_absolute():
+            try:
+                return str(path.resolve().relative_to(self.storage.resume_dir.resolve())).replace("\\", "/")
+            except Exception:
+                return path.name
+        return raw.replace("\\", "/")
+
     def _attempt_resume_extraction(self, engine: str, extractor: Any, file_path: Path, attempts: list[dict[str, Any]]) -> str:
         try:
             text = self._normalize_text(str(extractor(file_path) or ""))
@@ -511,6 +530,24 @@ class LocalCapabilities:
             "chars": len(text),
         })
         return text
+
+    def _extract_resume_text(self, file_path: Path, attempts: list[dict[str, Any]]) -> tuple[str, str]:
+        engine = "none"
+        text = ""
+        for candidate_engine, extractor in [
+            ("pdfplumber", self._extract_text_with_pdfplumber),
+            ("pypdf", self._extract_text_with_pypdf),
+            ("pdfminer_python_fallback", self._extract_text_with_pdfminer),
+        ]:
+            extracted = self._attempt_resume_extraction(candidate_engine, extractor, file_path, attempts)
+            if extracted:
+                engine = candidate_engine
+                text = extracted
+                break
+        return engine, text
+
+    def _has_missing_dependency(self, attempts: list[dict[str, Any]]) -> bool:
+        return any(attempt.get("failure_kind") == "missing_dependency" for attempt in attempts)
 
     def _extract_text_with_pdfplumber(self, file_path: Path) -> str:
         import pdfplumber
@@ -533,7 +570,13 @@ class LocalCapabilities:
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
 
-    def _summarize_resume_extract_failure(self, attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    def _summarize_resume_extract_failure(self, attempts: list[dict[str, Any]], dependency_install_attempt: dict[str, Any] | None = None) -> dict[str, Any]:
+        if dependency_install_attempt and not dependency_install_attempt.get("ok"):
+            return {
+                "engine": "pip_install",
+                "failure_kind": "dependency_install_failed",
+                "detail": dependency_install_attempt.get("error_detail") or dependency_install_attempt.get("stderr") or "pip_install_failed",
+            }
         for kind in ["missing_dependency", "parser_error", "empty_text"]:
             for attempt in attempts:
                 if attempt.get("failure_kind") == kind:
@@ -544,11 +587,23 @@ class LocalCapabilities:
                     }
         return {"engine": None, "failure_kind": "unknown", "detail": "no_extractors_succeeded"}
 
-    def _format_resume_extract_admin_message(self, resume_file: str, attempts: list[dict[str, Any]], primary_failure: dict[str, Any]) -> str:
+    def _format_resume_extract_admin_message(
+        self,
+        resume_file: str,
+        attempts: list[dict[str, Any]],
+        primary_failure: dict[str, Any],
+        dependency_install_attempt: dict[str, Any] | None = None,
+    ) -> str:
         stage = f"简历解析失败：在 extract_text 阶段读取 {resume_file} 时出错。"
         summary = f"首要失败点为 {primary_failure.get('engine') or 'unknown'}，原因：{primary_failure.get('failure_kind') or 'unknown'}"
         if primary_failure.get("detail"):
             summary += f"（{primary_failure['detail']}）"
+        install_note = ""
+        if dependency_install_attempt:
+            install_note = (
+                f" 系统已尝试在当前 Python 运行环境（{sys.executable}）中自动安装 PDF 解析依赖，"
+                + ("安装成功并已重试。" if dependency_install_attempt.get("ok") else f"但安装失败（{dependency_install_attempt.get('error_detail') or dependency_install_attempt.get('stderr') or 'no_detail'}）。")
+            )
         details = []
         for attempt in attempts:
             if attempt.get("ok"):
@@ -557,4 +612,34 @@ class LocalCapabilities:
                 details.append(f"{attempt['engine']}: empty_text")
             else:
                 details.append(f"{attempt['engine']}: {attempt.get('failure_kind', 'failed')} [{attempt.get('error', 'no_detail')}]")
-        return f"{stage} {summary}。尝试结果：{'；'.join(details)}。请提供可读的 PDF/TXT 简历文件或重新上传后再执行。"
+        return f"{stage} {summary}。{install_note} 尝试结果：{'；'.join(details)}。请提供可读的 PDF/TXT 简历文件或重新上传后再执行。"
+
+    def _repair_pdf_dependencies(self) -> dict[str, Any]:
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "pdfplumber",
+            "pypdf",
+            "pdfminer.six",
+        ]
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "install_target": sys.executable,
+                "error_detail": f"{exc.__class__.__name__}: {exc}",
+            }
+        result = {
+            "ok": proc.returncode == 0,
+            "install_target": sys.executable,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout[-2000:],
+            "stderr": proc.stderr[-2000:],
+        }
+        if not result["ok"]:
+            result["error_detail"] = result["stderr"] or result["stdout"] or "pip_install_failed"
+        return result
