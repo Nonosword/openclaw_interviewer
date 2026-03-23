@@ -1,0 +1,8 @@
+name: interview_start
+purpose: 候选人识别后启动面试并生成初始题队列。
+steps:
+  - candidate.lookup
+  - runtime.load
+  - retrieval.load_context
+  - queue.seed
+  - runtime.save

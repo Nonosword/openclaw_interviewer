@@ -1,0 +1,7 @@
+name: interview_case
+purpose: 根据 JD、岗位知识、简历与历史回答生成综合案例题。
+steps:
+  - runtime.load
+  - retrieval.load_context
+  - case.generate
+  - runtime.save

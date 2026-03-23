@@ -1,0 +1,33 @@
+{
+  "skill_name": "openclaw-interviewer",
+  "command_name": "openclaw-interviewer",
+  "bootstrap_command": "./setup",
+  "doctor_command": "openclaw-interviewer doctor",
+  "skill_root_markers": [
+    "SKILL.md",
+    "ENTRYPOINT.json",
+    "setup",
+    "openclaw-interviewer",
+    "config.yaml"
+  ],
+  "root_resolution_rules": [
+    "Only execute commands in the directory that contains all skill_root_markers.",
+    "If the current directory does not contain all skill_root_markers, it is not the skill root.",
+    "Do not guess absolute paths, legacy wrapper names, or Python module launch commands.",
+    "If openclaw-interviewer is missing or not executable inside the skill root, run ./setup once and then retry."
+  ],
+  "lanes": {
+    "admin": {
+      "allowed_command_prefixes": [
+        "openclaw-interviewer admin",
+        "openclaw-interviewer doctor",
+        "openclaw-interviewer harness"
+      ]
+    },
+    "candidate": {
+      "allowed_command_prefixes": [
+        "openclaw-interviewer interview"
+      ]
+    }
+  }
+}

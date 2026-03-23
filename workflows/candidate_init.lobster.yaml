@@ -1,0 +1,10 @@
+name: candidate_init
+purpose: 初始化 candidate、岗位知识库、简历 profile、题库和计时器。
+steps:
+  - candidate.read_registry
+  - domain.ensure
+  - resume.parse_pdf
+  - resume.build_profile
+  - resume.generate_questions
+  - timer.ensure
+  - candidate.write_registry

@@ -1,0 +1,9 @@
+name: admin_ops
+kind: lobster-style
+steps:
+  - list_candidates
+  - add_from_dialog
+  - bulk_update
+  - bulk_remove
+  - refresh_candidate
+  - inspect_rag

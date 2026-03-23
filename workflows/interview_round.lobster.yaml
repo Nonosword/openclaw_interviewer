@@ -1,0 +1,9 @@
+name: interview_round
+purpose: 推进单轮问答、评分与追问。
+steps:
+  - runtime.load
+  - question.select_next
+  - evaluation.score_answer
+  - followup.plan
+  - runtime.save
+  - interview.record_write

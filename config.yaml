@@ -1,0 +1,45 @@
+agent_workspaces:
+  candidate: .agent/candidate
+  admin: .agent/admin
+subagents:
+  dialog_parser:
+    agent_id: default
+    thinking: medium
+    timeout_seconds: 180
+  domain_builder:
+    agent_id: default
+    thinking: medium
+    timeout_seconds: 180
+  resume_parser:
+    agent_id: default
+    thinking: medium
+    timeout_seconds: 180
+  question_generator:
+    agent_id: default
+    thinking: medium
+    timeout_seconds: 180
+  evaluator:
+    agent_id: default
+    thinking: medium
+    timeout_seconds: 180
+  case_builder:
+    agent_id: default
+    thinking: medium
+    timeout_seconds: 180
+paths:
+  rag_root: .rag
+  workspace_root: .workspace
+  workflows_root: workflows
+defaults:
+  knowledge_prefix: knowledge
+  initial_domain_question_count: 4
+  initial_resume_question_count: 2
+  max_followups_total: 5
+  max_followups_chain: 2
+  max_interview_seconds: 3600
+  max_question_seconds: 300
+  late_grace_seconds: 0
+  question_distribution:
+    easy: 1
+    medium: 2
+    hard: 1

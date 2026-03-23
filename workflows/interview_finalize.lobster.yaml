@@ -1,0 +1,6 @@
+name: interview_finalize
+purpose: 归档 transcript、统计分项得分、写 interview record。
+steps:
+  - runtime.load
+  - interview.record_write
+  - runtime.save
