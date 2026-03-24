@@ -41,7 +41,7 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 - `openclaw.admin.retrieval.inspect`
 
 ## 允许的命令
-- `./setup` 仅限首次 bootstrap 或修复入口
+- `./setup`
 - `openclaw-interviewer doctor`
 - `openclaw-interviewer admin ...`
 - `openclaw-interviewer harness ...`

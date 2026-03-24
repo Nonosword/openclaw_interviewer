@@ -17,7 +17,7 @@ Explicit executable command map for the OpenClaw Interviewer skill.
 ## Bootstrap
 - `./setup`
 - `openclaw-interviewer doctor`
-- `./setup` also creates `.venv`, registers `openclaw-interviewer` and `openclaw-interviewer-admin`, and syncs `.agent/*.md` into their workspaces
+- `./setup` uses `uv venv .venv`, registers `openclaw-interviewer` and `openclaw-interviewer-admin`, and syncs `.agent/*.md` into their workspaces
 
 ## Admin lane
 - `openclaw-interviewer admin config-show`

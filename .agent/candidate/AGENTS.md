@@ -21,7 +21,7 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 ## Bootstrap 约束
 - 先读取项目根目录的 `ENTRYPOINT.json`
 - 只有同时存在 `SKILL.md`、`ENTRYPOINT.json`、`setup`、`openclaw-interviewer`、`config.yaml` 的目录，才是 skill 根目录
-- 若 `openclaw-interviewer` 不存在或不可执行，应要求 admin 先运行 `./setup`
+- 若 `openclaw-interviewer` 不存在、不可执行或命令异常，先执行 `./setup`
 
 ## 允许的 Skill Routes
 - `openclaw.interview.identify`
@@ -49,7 +49,7 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 - `./setup`
 - `openclaw-interviewer admin ...`
 - `openclaw-interviewer doctor`
-- `openclaw-interviewer harness ...`，除非上层明确进入测试场景
+- `openclaw-interviewer harness ...`
 - 任何 candidate maintenance / config / retrieval inspection 命令
 
 ## 总原则

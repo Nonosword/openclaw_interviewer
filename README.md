@@ -62,7 +62,7 @@ agent 不应先猜命令，而应先找 skill 根目录。
 
 `setup` 会完成以下 bootstrap 动作：
 - 初始化默认配置
-- 在项目根目录创建 `.venv`，后续统一用它执行 `openclaw-interviewer`
+- 通过 `uv venv .venv` 在项目根目录创建 `.venv`，后续统一用它执行 `openclaw-interviewer`
 - 检查并注册两个 OpenClaw agent：
   `openclaw agents add openclaw-interviewer --workspace ~/.openclaw/workspace_interviewer/candidate`
   `openclaw agents add openclaw-interviewer-admin --workspace ~/.openclaw/workspace_interviewer/admin`
@@ -94,7 +94,7 @@ openclaw-interviewer ...
 openclaw-interviewer doctor
 ```
 
-执行完成后，实际 Python 运行时会固定到项目根目录的 `.venv/bin/python`。
+执行完成后，实际 Python 运行时会固定到项目根目录的 `.venv/bin/python`，该环境由 `uv` 创建。
 
 ### 第二步：进入对应 lane
 

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 
 from interviewer.api.adapter import OpenClawAdapter
 from interviewer.harness import SkillHarness, dump_harness_result
-from interviewer.setup_wizard import run_setup
 from interviewer.storage.store import Storage
+
+
+def _run_setup(root: Path) -> int:
+    return subprocess.run(['/bin/sh', str(root / 'setup')], check=False).returncode
 
 
 def _resolve_jd_payload(root: Path, *, jd_id: str | None, jd_file: str | None, jd_text: str | None, jd_name: str | None, jd_role: str | None) -> dict:
@@ -91,7 +95,7 @@ def main() -> None:
     root = Path(__file__).resolve().parents[1]
     adapter = OpenClawAdapter(root)
     if args.command == 'setup':
-        raise SystemExit(run_setup(root))
+        raise SystemExit(_run_setup(root))
     if args.command == 'config-show':
         print(adapter.dispatch('openclaw.admin.config.show', {})); return
     if args.command == 'init-candidates':

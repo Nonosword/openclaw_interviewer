@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,10 @@ def _adapter() -> OpenClawAdapter:
 def _storage() -> Storage:
     cfg = load_config(_root())
     return Storage(_root(), rag_root=cfg.paths.rag_root, workspace_root=cfg.paths.workspace_root)
+
+
+def _run_setup() -> int:
+    return subprocess.run(['/bin/sh', str(_root() / 'setup')], check=False).returncode
 
 
 def _dump(obj: dict[str, Any]) -> None:
@@ -269,8 +274,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     if args.lane == 'setup':
-        from interviewer.setup_wizard import run_setup
-        raise SystemExit(run_setup(_root()))
+        raise SystemExit(_run_setup())
     if args.lane == 'admin':
         raise SystemExit(run_admin(args))
     if args.lane == 'interview':

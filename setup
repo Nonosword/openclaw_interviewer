@@ -1,5 +1,220 @@
-#!/usr/bin/env bash
-set -euo pipefail
+[ -n "${__OPENCLAW_SH:-}" ] || __OPENCLAW_SH=1 exec /bin/sh "$0" "$@"
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENTRYPOINT_PATH="$SCRIPT_DIR/openclaw-interviewer"
+OPENCLAW_HOME_DIR="${OPENCLAW_HOME:-$HOME/.openclaw}"
+CANDIDATE_WS="$OPENCLAW_HOME_DIR/workspace_interviewer/candidate"
+ADMIN_WS="$OPENCLAW_HOME_DIR/workspace_interviewer/admin"
+VENV_DIR="$SCRIPT_DIR/.venv"
+PYTHON_BIN="$VENV_DIR/bin/python"
+VENV_STATUS="ok"
+
+write_file() {
+  path="$1"
+  mkdir -p "$(dirname "$path")"
+  tmp="${path}.tmp.$$"
+  rm -f "$tmp"
+  cat > "$tmp"
+  mv -f "$tmp" "$path"
+}
+
+ensure_exec() {
+  path="$1"
+  if [ -e "$path" ]; then
+    chmod +x "$path" 2>/dev/null || true
+  fi
+}
+
+ensure_uv_venv() {
+  if [ -x "$PYTHON_BIN" ]; then
+    VENV_STATUS="ok"
+    return 0
+  fi
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "uv not found." >&2
+    exit 1
+  fi
+  uv venv "$VENV_DIR"
+  if [ ! -x "$PYTHON_BIN" ]; then
+    echo "uv venv did not create $PYTHON_BIN" >&2
+    exit 1
+  fi
+  VENV_STATUS="created"
+}
+
+ensure_entrypoints() {
+  write_file "$ENTRYPOINT_PATH" <<'EOF'
+[ -n "${__OPENCLAW_SH:-}" ] || __OPENCLAW_SH=1 exec /bin/sh "$0" "$@"
+set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"
-exec python3 -m interviewer.skill_cmd setup
+PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+  "$SCRIPT_DIR/setup"
+fi
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "Project bootstrap failed while creating $PYTHON_BIN." >&2
+  exit 1
+fi
+exec "$PYTHON_BIN" -m interviewer.skill_cmd "$@"
+EOF
+  chmod 755 "$ENTRYPOINT_PATH"
+
+  write_file "$SCRIPT_DIR/bin/admin" <<'EOF'
+[ -n "${__OPENCLAW_SH:-}" ] || __OPENCLAW_SH=1 exec /bin/sh "$0" "$@"
+set -eu
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"
+PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+  "$SCRIPT_DIR/setup"
+fi
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "Project bootstrap failed while creating $PYTHON_BIN." >&2
+  exit 1
+fi
+exec "$PYTHON_BIN" -m interviewer.skill_cmd admin "$@"
+EOF
+  chmod 755 "$SCRIPT_DIR/bin/admin"
+
+  write_file "$SCRIPT_DIR/bin/interview" <<'EOF'
+[ -n "${__OPENCLAW_SH:-}" ] || __OPENCLAW_SH=1 exec /bin/sh "$0" "$@"
+set -eu
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"
+PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+  "$SCRIPT_DIR/setup"
+fi
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "Project bootstrap failed while creating $PYTHON_BIN." >&2
+  exit 1
+fi
+exec "$PYTHON_BIN" -m interviewer.skill_cmd interview "$@"
+EOF
+  chmod 755 "$SCRIPT_DIR/bin/interview"
+
+  write_file "$SCRIPT_DIR/bin/doctor" <<'EOF'
+[ -n "${__OPENCLAW_SH:-}" ] || __OPENCLAW_SH=1 exec /bin/sh "$0" "$@"
+set -eu
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"
+PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+  "$SCRIPT_DIR/setup"
+fi
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "Project bootstrap failed while creating $PYTHON_BIN." >&2
+  exit 1
+fi
+exec "$PYTHON_BIN" -m interviewer.skill_cmd doctor "$@"
+EOF
+  chmod 755 "$SCRIPT_DIR/bin/doctor"
+
+  write_file "$SCRIPT_DIR/bin/harness" <<'EOF'
+[ -n "${__OPENCLAW_SH:-}" ] || __OPENCLAW_SH=1 exec /bin/sh "$0" "$@"
+set -eu
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"
+PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+  "$SCRIPT_DIR/setup"
+fi
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "Project bootstrap failed while creating $PYTHON_BIN." >&2
+  exit 1
+fi
+exec "$PYTHON_BIN" -m interviewer.skill_cmd harness "$@"
+EOF
+  chmod 755 "$SCRIPT_DIR/bin/harness"
+}
+
+ensure_storage_layout() {
+  mkdir -p \
+    "$SCRIPT_DIR/.rag/domain" \
+    "$SCRIPT_DIR/.rag/domain_question_bank" \
+    "$SCRIPT_DIR/.rag/jd" \
+    "$SCRIPT_DIR/.rag/resume/data" \
+    "$SCRIPT_DIR/.rag/candidates" \
+    "$SCRIPT_DIR/.rag/retrieval" \
+    "$SCRIPT_DIR/.workspace/runtime" \
+    "$SCRIPT_DIR/.workspace/interviews" \
+    "$SCRIPT_DIR/.workspace/scores" \
+    "$SCRIPT_DIR/.workspace/timers" \
+    "$SCRIPT_DIR/.workspace/logs"
+
+  [ -f "$SCRIPT_DIR/.rag/candidates/candidate.jsonl" ] || : > "$SCRIPT_DIR/.rag/candidates/candidate.jsonl"
+  [ -f "$SCRIPT_DIR/.rag/jd/jd.jsonl" ] || : > "$SCRIPT_DIR/.rag/jd/jd.jsonl"
+  [ -f "$SCRIPT_DIR/.workspace/interviews/interview_records.jsonl" ] || : > "$SCRIPT_DIR/.workspace/interviews/interview_records.jsonl"
+  [ -f "$SCRIPT_DIR/.workspace/scores/score_records.jsonl" ] || : > "$SCRIPT_DIR/.workspace/scores/score_records.jsonl"
+  [ -f "$SCRIPT_DIR/.workspace/timers/timers.jsonl" ] || : > "$SCRIPT_DIR/.workspace/timers/timers.jsonl"
+  [ -f "$SCRIPT_DIR/.workspace/logs/events.jsonl" ] || : > "$SCRIPT_DIR/.workspace/logs/events.jsonl"
+  [ -f "$SCRIPT_DIR/.workspace/logs/audit.jsonl" ] || : > "$SCRIPT_DIR/.workspace/logs/audit.jsonl"
+
+  if [ ! -f "$SCRIPT_DIR/.rag/retrieval/manifest.json" ]; then
+    write_file "$SCRIPT_DIR/.rag/retrieval/manifest.json" <<'EOF'
+{
+  "version": 4,
+  "indexes": {}
+}
+EOF
+  fi
+}
+
+sync_agent_docs() {
+  mkdir -p "$CANDIDATE_WS" "$ADMIN_WS" 2>/dev/null || return 0
+  cp "$SCRIPT_DIR/.agent/candidate/"*.md "$CANDIDATE_WS/" 2>/dev/null || true
+  cp "$SCRIPT_DIR/.agent/admin/"*.md "$ADMIN_WS/" 2>/dev/null || true
+}
+
+ensure_openclaw_agent() {
+  name="$1"
+  workspace="$2"
+  if ! command -v openclaw >/dev/null 2>&1; then
+    echo "OpenClaw agent $name: unavailable -> $workspace (openclaw not found)"
+    return 0
+  fi
+  if openclaw agents add "$name" --workspace "$workspace" --non-interactive --json >/dev/null 2>&1; then
+    echo "OpenClaw agent $name: created -> $workspace"
+    return 0
+  fi
+  echo "OpenClaw agent $name: skipped -> $workspace"
+}
+
+echo "== OpenClaw Interviewer Setup =="
+
+ensure_uv_venv
+ensure_entrypoints
+ensure_storage_layout
+ensure_exec "$SCRIPT_DIR/setup"
+ensure_exec "$ENTRYPOINT_PATH"
+ensure_exec "$SCRIPT_DIR/bin/admin"
+ensure_exec "$SCRIPT_DIR/bin/interview"
+ensure_exec "$SCRIPT_DIR/bin/doctor"
+ensure_exec "$SCRIPT_DIR/bin/harness"
+sync_agent_docs
+ensure_openclaw_agent "openclaw-interviewer" "$CANDIDATE_WS"
+ensure_openclaw_agent "openclaw-interviewer-admin" "$ADMIN_WS"
+
+echo "Skill 根目录: $SCRIPT_DIR"
+echo "命令入口声明: $SCRIPT_DIR/ENTRYPOINT.json"
+echo "Python 虚拟环境: $VENV_DIR ($VENV_STATUS)"
+echo "统一命令入口: $ENTRYPOINT_PATH"
+echo "兼容命令入口: $SCRIPT_DIR/bin/admin"
+echo "兼容命令入口: $SCRIPT_DIR/bin/interview"
+echo "兼容命令入口: $SCRIPT_DIR/bin/doctor"
+echo "兼容命令入口: $SCRIPT_DIR/bin/harness"
+if [ -d "$CANDIDATE_WS" ]; then
+  echo "同步 Agent docs -> $CANDIDATE_WS"
+fi
+if [ -d "$ADMIN_WS" ]; then
+  echo "同步 Agent docs -> $ADMIN_WS"
+fi
+echo "后续统一通过以下命令名执行："
+echo "- openclaw-interviewer doctor"
+echo "- openclaw-interviewer admin ..."
+echo "- openclaw-interviewer interview ..."
+echo "- openclaw-interviewer harness ..."
+echo "执行一次健康检查："
+"$ENTRYPOINT_PATH" doctor

@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+[ -n "${__OPENCLAW_SH:-}" ] || __OPENCLAW_SH=1 exec /bin/sh "$0" "$@"
+set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"
 PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
