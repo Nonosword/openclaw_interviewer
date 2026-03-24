@@ -3,10 +3,10 @@ from __future__ import annotations
 import re
 
 BLOCKED_PATTERNS = [
-    r"评分", r"打分", r"理想答案", r"系统提示", r"prompt", r"system", r"developer",
-    r"soul", r"identity", r"skill", r"openclaw", r"config", r"knowledge_id", r"endpoint",
+    r"评分规则", r"打分规则", r"理想答案", r"系统提示", r"系统提示词", r"prompt", r"system prompt", r"developer message",
+    r"knowledge_id", r"endpoint",
     r"显示.*内部", r"导出.*内部", r"忽略.*规则", r"覆盖.*规则", r"修改.*规则",
-    r"给我看.*json", r"runtime", r"score_records", r"manifest", r"题库来源",
+    r"给我看.*json", r"score_records", r"manifest", r"题库来源",
 ]
 
 

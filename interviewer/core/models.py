@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import hashlib
 from typing import Any, Literal
 import uuid
 
@@ -20,6 +21,46 @@ RuntimeState = Literal[
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+QUESTION_ID_PREFIXES: dict[str, str] = {
+    "domain": "dq",
+    "resume": "rq",
+    "followup": "fq",
+    "case": "cq",
+}
+
+
+def question_id_prefix(source: str | None) -> str:
+    return QUESTION_ID_PREFIXES.get(str(source or "").strip().lower(), "q")
+
+
+def is_source_question_id(value: str | None, source: str | None) -> bool:
+    text = str(value or "").strip()
+    prefix = question_id_prefix(source)
+    if not text.startswith(f"{prefix}_"):
+        return False
+    suffix = text[len(prefix) + 1 :]
+    return len(suffix) == 10 and all(ch in "0123456789abcdef" for ch in suffix.lower())
+
+
+def stable_question_id(source: str | None, *parts: Any) -> str:
+    prefix = question_id_prefix(source)
+    tokens = [str(source or "").strip().lower()]
+    for part in parts:
+        text = str(part or "").strip()
+        if text:
+            tokens.append(text)
+    digest = hashlib.blake2s("|".join(tokens).encode("utf-8"), digest_size=5).hexdigest()
+    return f"{prefix}_{digest}"
+
+
+def ensure_question_id(source: str | None, current_id: str | None = None, *stable_parts: Any) -> str:
+    if is_source_question_id(current_id, source):
+        return str(current_id)
+    if stable_parts:
+        return stable_question_id(source, *stable_parts)
+    return new_id(question_id_prefix(source))
 
 
 @dataclass

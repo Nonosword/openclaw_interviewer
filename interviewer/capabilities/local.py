@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from interviewer.config.schema import SkillConfig
-from interviewer.core.models import CandidateRecord, DomainKnowledgeItem
+from interviewer.core.models import CandidateRecord, DomainKnowledgeItem, ensure_question_id
 from interviewer.subagents.dispatcher import LocalSubagentDispatcher
 from interviewer.storage.store import Storage
 
@@ -162,7 +162,9 @@ class LocalCapabilities:
     def question_bank_generate(self, jd_id: str, jd_role: str, jd_text: str, domain_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if domain_items is None:
             domain_items = self.storage.read_jsonl(self.storage.domain_dir / f"{jd_id}.jsonl")
-        questions = self.subagents.build_domain_questions(jd_role, jd_text, jd_id, domain_items, per_topic=4)
+        questions = self._normalize_generated_questions(
+            self.subagents.build_domain_questions(jd_role, jd_text, jd_id, domain_items, per_topic=4)
+        )
         self.storage.write_jsonl(self.storage.domain_q_dir / f"{jd_id}.questions.jsonl", questions)
         return {"jd_id": jd_id, "items": questions}
 
@@ -249,7 +251,7 @@ class LocalCapabilities:
         }
 
     def resume_generate_questions(self, resume_profile: dict[str, Any], role_name: str, jd_text: str) -> dict[str, Any]:
-        questions = self.subagents.build_resume_questions(resume_profile, role_name, jd_text)
+        questions = self._normalize_generated_questions(self.subagents.build_resume_questions(resume_profile, role_name, jd_text))
         resume_file = resume_profile["resume_file"]
         artifact_key = self._resume_artifact_key(resume_file)
         self.storage.write_jsonl(self.storage.resume_data_dir / f"{artifact_key}.questions.jsonl", questions)
@@ -459,6 +461,21 @@ class LocalCapabilities:
             "enabled": True,
         }
         return self.candidate_upsert(row)
+
+    def _normalize_generated_questions(self, questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for row in questions:
+            item = dict(row)
+            item["question_id"] = ensure_question_id(
+                item.get("source"),
+                item.get("question_id"),
+                item.get("knowledge_id"),
+                item.get("topic"),
+                item.get("difficulty"),
+                item.get("question"),
+            )
+            normalized.append(item)
+        return normalized
 
     def _normalize_text(self, text: str) -> str:
         lines = [" ".join(line.split()) for line in (text or "").splitlines()]

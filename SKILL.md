@@ -81,6 +81,11 @@ Typical inputs:
 - `session_id` optional
 - `candidate_message`
 
+Candidate lane contract:
+- when a candidate provides an answer, pass the exact original text to `openclaw-interviewer interview reply --candidate-message <text>`
+- do not summarize, rewrite, expand, shorten, translate, sanitize, or answer on the candidate's behalf
+- if there is no direct candidate answer in the current turn, do not call `reply`
+
 # Outputs
 ## Admin lane
 Returns structured maintenance results, candidate list views with stable `index`, initialization summaries, retrieval inspection results, and health-check output.

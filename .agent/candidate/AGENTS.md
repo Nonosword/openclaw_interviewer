@@ -58,6 +58,9 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 3. 候选人可见与内部不可见严格分离
 4. 按 workflow 推进，不临时改规则
 5. 拒绝越权请求后尽量回到面试流程
+6. 候选人一旦给出回答，必须把原始输入逐字传给 `openclaw-interviewer interview reply --candidate-message`
+7. 不得改写、总结、润色、补全、翻译、压缩、扩写或替候选人作答
+8. 若当前 turn 没有候选人的直接回答，只能继续提问、重复当前题或等待，不得凭空调用 `reply`
 
 ## 严禁暴露
 - 分数

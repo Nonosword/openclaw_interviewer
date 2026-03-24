@@ -9,7 +9,7 @@ from interviewer.capabilities.registry import CapabilityRegistry
 from interviewer.capabilities.retrieval import LocalRetrieval
 from interviewer.config.loader import load_config
 from interviewer.core.communication import Communicator
-from interviewer.core.models import InterviewRuntime, new_id
+from interviewer.core.models import InterviewRuntime, ensure_question_id, new_id, question_id_prefix
 from interviewer.core.security import SecurityPolicy
 from interviewer.simple_yaml import load_yaml_text
 from interviewer.workflow.steps import InterviewStepHandlers, WorkflowStepRecorder
@@ -259,10 +259,25 @@ class WorkflowRunner:
             self.step_recorder.record('interview_round', 'deny_probe', state_before=runtime.state, state_after=runtime.state, session_id=session_id, candidate_id=runtime.candidate_id)
             return {'action': 'deny', 'visible_message': self.comm.denied(), 'state': runtime.state}
         question = self._find_question(runtime, runtime.current_question_id)
+        received_at = datetime.now().astimezone().isoformat()
+        reply_record = self._build_reply_record(runtime, question, candidate_message, received_at=received_at)
+        self.cap.storage.append_jsonl(self.cap.storage.score_records_path, reply_record)
+        self.registry.execute('event.write', event_type='reply_received', payload={'session_id': session_id, 'question_id': question['question_id'], 'reply_id': reply_record['reply_id']})
         question['answer_count'] = int(question.get('answer_count', 0)) + 1
-        score = self.steps.score_answer(runtime, question, candidate_message)
-        score['session_id'] = session_id
-        self.cap.storage.append_jsonl(self.cap.storage.score_records_path, score)
+        try:
+            score = self.steps.score_answer(runtime, question, candidate_message, received_at=received_at)
+        except ValueError as exc:
+            error_payload = self._value_error_payload(exc)
+            failed_record = self._merge_reply_record_error(reply_record, error_payload)
+            self.cap.storage.rewrite_jsonl_by_key(self.cap.storage.score_records_path, 'reply_id', reply_record['reply_id'], failed_record)
+            self.registry.execute(
+                'event.write',
+                event_type='reply_score_failed',
+                payload={'session_id': session_id, 'question_id': question['question_id'], 'reply_id': reply_record['reply_id'], 'error_code': failed_record['error_code']},
+            )
+            raise
+        score = self._merge_reply_record_success(reply_record, score, session_id=session_id)
+        self.cap.storage.rewrite_jsonl_by_key(self.cap.storage.score_records_path, 'reply_id', reply_record['reply_id'], score)
         question['_latest_matched_points'] = score['coverage']['matched_points']
         question['_latest_missing_points'] = score['coverage']['missing_points']
         question['_latest_coverage_ratio'] = score['coverage']['coverage_ratio']
@@ -276,7 +291,7 @@ class WorkflowRunner:
             worker_question_id = followup.get('question_id')
             followup['builder_question_id'] = worker_question_id
             followup['source'] = 'followup'
-            followup['question_id'] = new_id('fq')
+            followup['question_id'] = new_id(question_id_prefix('followup'))
             followup['source_question_id'] = question['question_id']
             followup['asked'] = True
             runtime.current_question_id = followup['question_id']
@@ -304,7 +319,7 @@ class WorkflowRunner:
         case_q.setdefault('difficulty', 'hard')
         case_q.setdefault('topic', 'case_final')
         case_q['builder_question_id'] = worker_question_id
-        case_q['question_id'] = new_id('case')
+        case_q['question_id'] = new_id(question_id_prefix('case'))
         case_q.setdefault('order', max([q['order'] for q in runtime.queue], default=0) + 1)
         case_q['asked'] = True
         runtime.queue.append(case_q)
@@ -319,6 +334,15 @@ class WorkflowRunner:
 
     def interview_finish(self, session_id: str) -> dict[str, Any]:
         runtime = self._load_runtime(session_id)
+        pending_question = self._current_reply_question(runtime)
+        if pending_question is not None:
+            return {
+                'ok': False,
+                'error_code': 'reply_pending',
+                'question_id': pending_question['question_id'],
+                'state': runtime.state,
+                'visible_message': self.comm.ask_question(pending_question['question']),
+            }
         history = self._session_history(session_id)
         final_meta = self.steps.finalize(runtime, history)
         final_score = final_meta['final_score']
@@ -374,7 +398,14 @@ class WorkflowRunner:
         queue = []
         for idx, row in enumerate(rows, start=1):
             item = dict(row)
-            item.setdefault('question_id', new_id('q'))
+            item['question_id'] = ensure_question_id(
+                item.get('source'),
+                item.get('question_id'),
+                item.get('knowledge_id'),
+                item.get('topic'),
+                item.get('difficulty'),
+                item.get('question'),
+            )
             item['order'] = idx
             item['asked'] = False
             item.setdefault('answer_count', 0)
@@ -437,8 +468,72 @@ class WorkflowRunner:
     def _session_history(self, session_id: str) -> list[dict[str, Any]]:
         return [
             row for row in self.cap.storage.read_jsonl(self.cap.storage.score_records_path)
-            if row.get('session_id') == session_id
+            if row.get('session_id') == session_id and self._is_scored_reply_record(row)
         ]
+
+    def _current_reply_question(self, runtime: InterviewRuntime) -> dict[str, Any] | None:
+        if runtime.state != 'WAITING_FOR_REPLY' or not runtime.current_question_id:
+            return None
+        try:
+            current = self._find_question(runtime, runtime.current_question_id)
+        except ValueError:
+            return None
+        if current.get('asked') and int(current.get('answer_count') or 0) == 0:
+            return current
+        return None
+
+    def _build_reply_record(self, runtime: InterviewRuntime, question: dict[str, Any], candidate_message: str, *, received_at: str) -> dict[str, Any]:
+        raw_text = '' if candidate_message is None else str(candidate_message)
+        return {
+            'reply_id': new_id('reply'),
+            'reply_status': 'received',
+            'session_id': runtime.session_id,
+            'candidate_id': runtime.candidate_id,
+            'question_id': question.get('question_id'),
+            'question_text': question.get('question', ''),
+            'source': question.get('source'),
+            'difficulty': question.get('difficulty'),
+            'topic': question.get('topic'),
+            'source_question_id': question.get('source_question_id'),
+            'reply_text': raw_text,
+            'raw_reply_text': raw_text,
+            'normalized_reply_text': raw_text.strip(),
+            'timing': {
+                'question_started_at': runtime.question_started_at,
+                'reply_received_at': received_at,
+                'response_seconds': None,
+                'max_question_seconds': runtime.max_question_seconds,
+            },
+            'coverage': None,
+            'score': None,
+            'reason': None,
+            'suggestion': None,
+            'evidence_refs': question.get('evidence_refs', []),
+            'error_code': None,
+            'error_detail': None,
+        }
+
+    def _merge_reply_record_success(self, base_record: dict[str, Any], score: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+        merged = dict(base_record)
+        merged.update(score)
+        merged['session_id'] = session_id
+        merged['reply_id'] = base_record['reply_id']
+        merged['reply_status'] = 'scored'
+        merged['raw_reply_text'] = base_record.get('raw_reply_text')
+        return merged
+
+    def _merge_reply_record_error(self, base_record: dict[str, Any], error_payload: dict[str, Any]) -> dict[str, Any]:
+        failed = dict(base_record)
+        failed['reply_status'] = 'error'
+        failed['error_code'] = error_payload.get('error_code')
+        failed['error_detail'] = error_payload.get('error_detail') or error_payload.get('stderr') or error_payload.get('stdout')
+        return failed
+
+    def _is_scored_reply_record(self, row: dict[str, Any]) -> bool:
+        status = str(row.get('reply_status') or '')
+        if status == 'scored':
+            return True
+        return row.get('score') is not None and not row.get('error_code')
 
     def _question_summary(self, question: dict[str, Any], score_row: dict[str, Any] | None) -> dict[str, Any]:
         score_row = score_row or {}
@@ -456,7 +551,7 @@ class WorkflowRunner:
             'scoring_focus': question.get('scoring_focus', []),
             'ideal_answer_points': question.get('ideal_answer_points', []),
             'followup_hints': question.get('followup_hints', []),
-            'candidate_answer': score_row.get('reply_text'),
+            'candidate_answer': score_row.get('raw_reply_text') or score_row.get('reply_text'),
             'model_score': score_row.get('score'),
             'overall_score': ((score_row.get('score') or {}).get('overall')),
             'evaluation': {

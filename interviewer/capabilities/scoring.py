@@ -28,7 +28,8 @@ class Evaluator:
         history: list[dict[str, Any]] | None = None,
         received_at: str | None = None,
     ) -> dict[str, Any]:
-        reply_text = (reply_text or '').strip()
+        reply_text = '' if reply_text is None else str(reply_text)
+        normalized_reply_text = reply_text.strip()
         received_at = received_at or datetime.now().astimezone().isoformat()
         response_seconds = None
         if started_at:
@@ -61,6 +62,7 @@ class Evaluator:
             'question_text': question.get('question', ''),
             'candidate_id': candidate_id,
             'reply_text': reply_text,
+            'normalized_reply_text': normalized_reply_text,
             'timing': {
                 'question_started_at': started_at,
                 'reply_received_at': received_at,

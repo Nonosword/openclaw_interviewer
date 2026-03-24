@@ -91,7 +91,7 @@ class InterviewStepHandlers:
         )
         return selected
 
-    def score_answer(self, runtime: InterviewRuntime, question: dict[str, Any], candidate_message: str) -> dict[str, Any]:
+    def score_answer(self, runtime: InterviewRuntime, question: dict[str, Any], candidate_message: str, *, received_at: str | None = None) -> dict[str, Any]:
         candidate = self.runner._load_candidate(runtime.candidate_id)
         jd = self.runner.cap.jd_lookup(candidate['jd_id'])
         resume_profile = None
@@ -109,6 +109,7 @@ class InterviewStepHandlers:
             candidate_id=runtime.candidate_id or 'unknown',
             started_at=runtime.question_started_at,
             max_question_seconds=runtime.max_question_seconds,
+            received_at=received_at,
             role_name=candidate['interview_role'],
             jd_text=jd['jd_text'],
             resume_profile=resume_profile,
