@@ -5,9 +5,13 @@ version: 0.9.0
 metadata:
   openclaw:
     emoji: "🎤"
+    homepage: "https://github.com/Nonosword/openclaw_interviewer"
     requires:
       bins:
         - python3
+      anyBins:
+        - uv
+        - pip
 ---
 
 # Purpose
