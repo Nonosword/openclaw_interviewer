@@ -29,6 +29,7 @@ class Storage:
         self.timers_path = self.timers_dir / "timers.jsonl"
         self.events_path = self.logs_dir / "events.jsonl"
         self.audit_path = self.logs_dir / "audit.jsonl"
+        self.workflow_steps_path = self.logs_dir / "workflow_steps.jsonl"
         self.retrieval_manifest_path = self.retrieval_dir / "manifest.json"
         self._ensure()
 
@@ -39,7 +40,7 @@ class Storage:
             self.scores_dir, self.timers_dir, self.logs_dir,
         ]:
             p.mkdir(parents=True, exist_ok=True)
-        for f in [self.candidates_path, self.jd_path, self.interview_records_path, self.score_records_path, self.timers_path, self.events_path, self.audit_path]:
+        for f in [self.candidates_path, self.jd_path, self.interview_records_path, self.score_records_path, self.timers_path, self.events_path, self.audit_path, self.workflow_steps_path]:
             if not f.exists():
                 f.write_text("", encoding="utf-8")
         if not self.retrieval_manifest_path.exists():
@@ -110,6 +111,9 @@ class Storage:
 
     def audit(self, event_type: str, payload: dict[str, Any]) -> None:
         self.append_jsonl(self.audit_path, {"type": event_type, "payload": payload})
+
+    def log_workflow_step(self, payload: dict[str, Any]) -> None:
+        self.append_jsonl(self.workflow_steps_path, payload)
 
     def update_manifest(self, key: str, value: Any) -> None:
         manifest = self.load_json(self.retrieval_manifest_path) or {"version": 4, "indexes": {}}

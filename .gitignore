@@ -14,7 +14,7 @@ data/
 pending_review/
 review_ticket/
 *.npy
-novel_writer.egg-info
+*.egg-info
 
 .DS_Store
 .idea/

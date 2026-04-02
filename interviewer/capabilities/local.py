@@ -113,11 +113,27 @@ class LocalCapabilities:
         if not row:
             raise ValueError("candidate_not_found")
         jd = self._get_jd(row["jd_id"])
-        self.domain_ensure(jd_id=jd["jd_id"], jd_role=jd["jd_role"], jd_text=jd["jd_text"])
-        profile = self.resume_build_profile(row["resume_file"], row["interview_role"], jd["jd_text"], row.get("candidate_name"))
+        domain = self.domain_ensure(jd_id=jd["jd_id"], jd_role=jd["jd_role"], jd_text=jd["jd_text"])
+        profile_ref = self._expected_resume_profile_ref(row["resume_file"])
+        if self._resume_profile_artifacts_ready(row):
+            profile_payload = self.storage.load_json(self.storage.resume_data_dir / Path(profile_ref).name) or {}
+            profile = {
+                "resume_profile_file": profile_ref,
+                "resume_question_bank_file": self._expected_resume_question_bank_ref(row["resume_file"]),
+                "fit_score": ((profile_payload.get("job_fit") or {}).get("fit_score") or 0),
+                "questions": len(
+                    self.storage.read_jsonl(
+                        self.storage.resume_data_dir / Path(self._expected_resume_question_bank_ref(row["resume_file"])).name
+                    )
+                ),
+                "reused": True,
+            }
+        else:
+            profile = self.resume_build_profile(row["resume_file"], row["interview_role"], jd["jd_text"], row.get("candidate_name"))
+            profile["reused"] = False
         timer = self.timer_ensure(candidate_id=row["candidate_id"], scheduled_at=row["scheduled_at"])
         row["question_bank_id"] = f"{jd['jd_id']}.questions"
-        row["resume_profile_file"] = f"data/{self._resume_artifact_key(row['resume_file'])}.profile.json"
+        row["resume_profile_file"] = profile_ref
         row["timer_id"] = timer["timer_id"]
         if not row.get("latest_interview"):
             row["status"] = "ready"
@@ -128,6 +144,8 @@ class LocalCapabilities:
             "resume_profile_file": row["resume_profile_file"],
             "fit_score": profile["fit_score"],
             "timer_id": timer["timer_id"],
+            "domain_created": domain["created"],
+            "resume_profile_reused": bool(profile.get("reused")),
         }
 
     def domain_ensure(self, jd_id: str, jd_role: str | None = None, jd_text: str | None = None) -> dict[str, Any]:
@@ -144,6 +162,10 @@ class LocalCapabilities:
             "question_bank_file": str(q_file.relative_to(self.storage.root)),
             "created": created,
         }
+
+    def domain_artifacts_ready(self, jd_id: str) -> bool:
+        target = self._require_nonempty_text("jd_id", jd_id)
+        return (self.storage.domain_dir / f"{target}.jsonl").exists() and (self.storage.domain_q_dir / f"{target}.questions.jsonl").exists()
 
     def domain_generate_knowledge(self, jd_id: str, jd_role: str | None = None, jd_text: str | None = None) -> dict[str, Any]:
         jd = self._resolve_domain_jd(jd_id, jd_role, jd_text)
@@ -222,8 +244,25 @@ class LocalCapabilities:
             self.storage.save_text(self.storage.resume_data_dir / f"{artifact_key}.txt", text)
         return result
 
-    def resume_build_profile(self, resume_file: str, role_name: str, jd_text: str, candidate_name: str | None = None) -> dict[str, Any]:
-        extracted = self.resume_parse_pdf(resume_file)
+    def resume_extract_artifact_ready(self, resume_file: str) -> bool:
+        file_path = self._resolve_resume_path(resume_file)
+        artifact_key = self._resume_artifact_key(resume_file)
+        txt_sidecar = file_path if file_path.suffix.lower() in {".txt", ".md"} else Path(f"{file_path}.txt")
+        if txt_sidecar.exists():
+            return bool(self._normalize_text(txt_sidecar.read_text(encoding="utf-8")))
+        saved = self.storage.load_json(self.storage.resume_data_dir / f"{artifact_key}.extract.json") or {}
+        return bool(self._normalize_text(str(saved.get("text") or "")))
+
+    def resume_profile_generate(
+        self,
+        resume_file: str,
+        role_name: str,
+        jd_text: str,
+        candidate_name: str | None = None,
+        *,
+        extracted: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        extracted = extracted or self.resume_parse_pdf(resume_file)
         artifact_key = self._resume_artifact_key(resume_file)
         profile_error_sidecar = self.storage.resume_data_dir / f"{artifact_key}.profile.error.json"
         try:
@@ -238,15 +277,24 @@ class LocalCapabilities:
             }
             self.storage.save_json(profile_error_sidecar, failure)
             raise ValueError("resume_profile_build_failed", failure) from exc
-        questions = self.resume_generate_questions(profile, role_name, jd_text)
-        profile["resume_question_bank_ref"] = f"data/{artifact_key}.questions.jsonl"
+        profile["resume_question_bank_ref"] = self._expected_resume_question_bank_ref(resume_file)
         self.storage.save_json(self.storage.resume_data_dir / f"{artifact_key}.profile.json", profile)
         self._clear_sidecar(profile_error_sidecar)
         fit_score = ((profile.get("job_fit") or {}).get("fit_score") or 0)
         return {
-            "resume_profile_file": f"data/{artifact_key}.profile.json",
-            "resume_question_bank_file": f"data/{artifact_key}.questions.jsonl",
+            "resume_profile_file": self._expected_resume_profile_ref(resume_file),
+            "resume_question_bank_file": self._expected_resume_question_bank_ref(resume_file),
             "fit_score": fit_score,
+            "profile": profile,
+        }
+
+    def resume_build_profile(self, resume_file: str, role_name: str, jd_text: str, candidate_name: str | None = None) -> dict[str, Any]:
+        profile_result = self.resume_profile_generate(resume_file, role_name, jd_text, candidate_name)
+        questions = self.resume_generate_questions(profile_result["profile"], role_name, jd_text)
+        return {
+            "resume_profile_file": profile_result["resume_profile_file"],
+            "resume_question_bank_file": profile_result["resume_question_bank_file"],
+            "fit_score": profile_result["fit_score"],
             "questions": len(questions["items"]),
         }
 
@@ -256,6 +304,24 @@ class LocalCapabilities:
         artifact_key = self._resume_artifact_key(resume_file)
         self.storage.write_jsonl(self.storage.resume_data_dir / f"{artifact_key}.questions.jsonl", questions)
         return {"resume_file": resume_file, "items": questions}
+
+    def resume_question_bank_generate(self, resume_file: str, role_name: str, jd_text: str) -> dict[str, Any]:
+        profile_ref = self._expected_resume_profile_ref(resume_file)
+        profile = self.storage.load_json(self.storage.resume_data_dir / Path(profile_ref).name)
+        if not profile:
+            raise ValueError("resume_profile_missing")
+        questions = self.resume_generate_questions(profile, role_name, jd_text)
+        profile["resume_question_bank_ref"] = self._expected_resume_question_bank_ref(resume_file)
+        self.storage.save_json(self.storage.resume_data_dir / Path(profile_ref).name, profile)
+        return {
+            "resume_file": resume_file,
+            "resume_question_bank_file": self._expected_resume_question_bank_ref(resume_file),
+            "questions": len(questions["items"]),
+        }
+
+    def resume_question_bank_ready(self, resume_file: str) -> bool:
+        bank_path = self.storage.resume_data_dir / Path(self._expected_resume_question_bank_ref(resume_file)).name
+        return bool(self.storage.read_jsonl(bank_path))
 
     def timer_ensure(self, candidate_id: str, scheduled_at: str) -> dict[str, Any]:
         timer_id = f"timer_{candidate_id}"
@@ -270,6 +336,18 @@ class LocalCapabilities:
         }
         self.storage.rewrite_jsonl_by_key(self.storage.timers_path, "timer_id", timer_id, row)
         return row
+
+    def timer_ready(self, candidate_id: str, scheduled_at: str, timer_id: str | None = None) -> bool:
+        expected_timer_id = str(timer_id or f"timer_{candidate_id}")
+        for row in self.storage.read_jsonl(self.storage.timers_path):
+            if row.get("timer_id") != expected_timer_id:
+                continue
+            if row.get("candidate_id") != candidate_id:
+                return False
+            if str(row.get("scheduled_at") or "") != str(scheduled_at or ""):
+                return False
+            return True
+        return False
 
     def retrieval_inspect(self) -> dict[str, Any]:
         return {
@@ -504,6 +582,26 @@ class LocalCapabilities:
         if resume_profile_file and not resume_profile_file.startswith("data/"):
             normalized["resume_profile_file"] = f"data/{self._resume_artifact_key(normalized['resume_file'])}.profile.json"
         return normalized
+
+    def _expected_resume_profile_ref(self, resume_file: str) -> str:
+        return f"data/{self._resume_artifact_key(resume_file)}.profile.json"
+
+    def _expected_resume_question_bank_ref(self, resume_file: str) -> str:
+        return f"data/{self._resume_artifact_key(resume_file)}.questions.jsonl"
+
+    def _resume_profile_artifacts_ready(self, row: dict[str, Any]) -> bool:
+        resume_file = self._require_nonempty_text("resume_file", row.get("resume_file"))
+        expected_profile_ref = self._expected_resume_profile_ref(resume_file)
+        if str(row.get("resume_profile_file") or "").strip() != expected_profile_ref:
+            return False
+        profile_path = self.storage.resume_data_dir / Path(expected_profile_ref).name
+        question_bank_path = self.storage.resume_data_dir / Path(self._expected_resume_question_bank_ref(resume_file)).name
+        if not profile_path.exists() or not question_bank_path.exists():
+            return False
+        profile_payload = self.storage.load_json(profile_path) or {}
+        if not profile_payload:
+            return False
+        return bool(self.storage.read_jsonl(question_bank_path))
 
     def _resolve_domain_jd(self, jd_id: str, jd_role: str | None, jd_text: str | None) -> dict[str, Any]:
         if jd_role and jd_text:

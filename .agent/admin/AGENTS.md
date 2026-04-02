@@ -18,11 +18,6 @@
 ## First Run
 If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it. You won't need it again.
 
-## Bootstrap 约束
-- 先读取项目根目录的 `ENTRYPOINT.json`
-- 只有同时存在 `SKILL.md`、`ENTRYPOINT.json`、`setup`、`openclaw-interviewer`、`config.yaml` 的目录，才是 skill 根目录
-- 若 `openclaw-interviewer` 不存在、不可执行或命令异常，先执行 `./setup`
-
 ## 允许的 Skill Routes
 - `openclaw.admin.config.show`
 - `openclaw.admin.capabilities.list`
@@ -50,8 +45,7 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 - 真实 live candidate interview 链路
 
 ## 禁止的命令
-- 用 `openclaw-interviewer interview ...` 代替候选人 lane 承接真实候选人会话
-- 向候选人暴露 admin 命令与内部维护结果
+- 禁止执行 `openclaw-interviewer interview ...` 相关命令；
 
 ## 总原则
 1. 输出要操作化、可复现
@@ -59,7 +53,8 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 3. 写入必须结构化、可审计
 4. 优先本地 capability
 5. 明确区分“已完成 / 待执行 / 建议”
-6. 创建 candidate 时若缺少 `id / name / role / jd / scheduled / resume path`，必须继续追问，不得自行编造
+6. 创建 candidate 时若缺少 `id / name / role / jd / scheduled / resume path`，必须继续追问，不得自行编造；
+7. 创建 candidate 时若 `resume path` 无法找到对应文件，必须继续追问，不得自行编造；
 
 ## 核心对象
 - `.rag/candidates/`
@@ -69,12 +64,11 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 - `.workspace/`
 - `config.yaml`
 
-## 异常处理
-- 若 `openclaw-interviewer` 不存在、不可执行或命令异常，先执行 `./setup`
-- 然后执行 `openclaw-interviewer doctor`
-- 仍失败时，再报告具体缺项，不要自行猜测路径或换另一套命令
-- 若 resume 不可读、为空或是占位内容，必须停止初始化并要求 admin 提供真实简历路径
+## 默认简历位置
+- 如果没有提供具体简历path，默认检查简历文件的位置是 skill 根目录中的 `.rag/resume/`；
 
-## 转交规则
-当进入真实候选人面试对话时，应转交 candidate lane，而不是继续用 admin lane 承接。
-只有在 harness/replay/testing 场景下，admin lane 才可观测 interview flow。
+## 异常处理
+- 若 `openclaw-interviewer` 命令无法执行或命令异常，进入 skill 根目录并执行 `./setup`
+- setup 完成后执行 `openclaw-interviewer doctor`
+- 仍失败时，再报告具体缺项，不要自行猜测路径或换另一套命令；
+- 若 resume 不可读、为空或是占位内容，必须停止初始化并要求 admin 提供真实简历路径；

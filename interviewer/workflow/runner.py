@@ -36,7 +36,7 @@ class WorkflowRunner:
         self.registry.register('candidate.lookup', self.cap.candidate_lookup)
         self.registry.register('candidate.upsert', self.cap.candidate_upsert, side_effect=True)
         self.registry.register('candidate.remove', self.cap.candidate_remove, side_effect=True)
-        self.registry.register('candidate.initialize', self.cap.candidate_initialize, side_effect=True)
+        self.registry.register('candidate.initialize', self._candidate_init_workflow, side_effect=True)
         self.registry.register('candidate.bulk_update', self.cap.candidate_bulk_update, side_effect=True)
         self.registry.register('candidate.bulk_remove', self.cap.candidate_bulk_remove, side_effect=True)
         self.registry.register('candidate.add_from_dialog', self.cap.candidate_add_from_dialog, side_effect=True)
@@ -458,6 +458,330 @@ class WorkflowRunner:
         if len(exc.args) > 1 and isinstance(exc.args[1], dict):
             payload.update(exc.args[1])
         return payload
+
+    def _record_persistent_step(
+        self,
+        workflow: str,
+        step: str,
+        *,
+        state_before: str | None,
+        state_after: str | None,
+        **details: Any,
+    ) -> None:
+        self.step_recorder.record(workflow, step, state_before=state_before, state_after=state_after, **details)
+        self.cap.storage.log_workflow_step(
+            {
+                'workflow': workflow,
+                'step': step,
+                'state_before': state_before,
+                'state_after': state_after,
+                'details': details,
+                'timestamp': datetime.now().astimezone().isoformat(),
+            }
+        )
+
+    def _candidate_init_step_names(self) -> list[str]:
+        workflow = self.workflow_specs.get('candidate_init.lobster') or self.workflow_specs.get('candidate_init') or {}
+        steps = workflow.get('steps') if isinstance(workflow, dict) else None
+        if isinstance(steps, list) and steps:
+            return [str(step) for step in steps]
+        return [
+            'candidate.read_registry',
+            'domain.ensure',
+            'resume.parse_pdf',
+            'resume.build_profile',
+            'resume.generate_questions',
+            'timer.ensure',
+            'candidate.write_registry',
+        ]
+
+    def _candidate_init_checkpoint(self, row: dict[str, Any]) -> dict[str, Any]:
+        raw = row.get('initialization_checkpoint')
+        allowed_steps = set(self._candidate_init_step_names())
+        checkpoint = dict(raw) if isinstance(raw, dict) else {}
+        completed_steps = [str(step) for step in checkpoint.get('completed_steps', []) if str(step) in allowed_steps]
+        checkpoint['workflow'] = 'candidate_init'
+        checkpoint['completed_steps'] = completed_steps
+        checkpoint['status'] = str(checkpoint.get('status') or 'pending')
+        checkpoint['current_step'] = checkpoint.get('current_step')
+        checkpoint['last_completed_step'] = checkpoint.get('last_completed_step')
+        checkpoint['next_step'] = checkpoint.get('next_step')
+        checkpoint['started_at'] = checkpoint.get('started_at')
+        checkpoint['updated_at'] = checkpoint.get('updated_at')
+        checkpoint['last_error'] = checkpoint.get('last_error') if isinstance(checkpoint.get('last_error'), dict) else None
+        return checkpoint
+
+    def _save_candidate_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        self.cap.storage.rewrite_jsonl_by_key(self.cap.storage.candidates_path, 'candidate_id', row['candidate_id'], row)
+        return self._load_candidate(row['candidate_id'])
+
+    def _candidate_init_error_status(self, error_code: str) -> str:
+        return 'resume_parse_failed' if str(error_code).startswith('resume_') else 'init_failed'
+
+    def _candidate_init_registry_ready(self, row: dict[str, Any]) -> bool:
+        expected_profile = self.cap._expected_resume_profile_ref(row['resume_file'])
+        expected_qbank = f"{row['jd_id']}.questions"
+        if str(row.get('resume_profile_file') or '') != expected_profile:
+            return False
+        if str(row.get('question_bank_id') or '') != expected_qbank:
+            return False
+        if not self.cap.timer_ready(row['candidate_id'], row['scheduled_at'], row.get('timer_id')):
+            return False
+        return row.get('status') in {'ready', 'interview_completed'}
+
+    def _candidate_init_step_complete(self, row: dict[str, Any], step: str) -> bool:
+        if step == 'candidate.read_registry':
+            return True
+        if step == 'domain.ensure':
+            return self.cap.domain_artifacts_ready(row['jd_id'])
+        if step == 'resume.parse_pdf':
+            try:
+                return self.cap.resume_extract_artifact_ready(row['resume_file'])
+            except ValueError:
+                return False
+        if step == 'resume.build_profile':
+            return bool(
+                self.cap.storage.load_json(
+                    self.cap.storage.resume_data_dir / Path(self.cap._expected_resume_profile_ref(row['resume_file'])).name
+                )
+            )
+        if step == 'resume.generate_questions':
+            return self.cap.resume_question_bank_ready(row['resume_file'])
+        if step == 'timer.ensure':
+            return self.cap.timer_ready(row['candidate_id'], row['scheduled_at'], row.get('timer_id'))
+        if step == 'candidate.write_registry':
+            return self._candidate_init_registry_ready(row)
+        return False
+
+    def _candidate_init_sync_row(self, row: dict[str, Any], step: str) -> dict[str, Any]:
+        synced = dict(row)
+        if step in {'domain.ensure', 'candidate.write_registry'}:
+            synced['question_bank_id'] = f"{synced['jd_id']}.questions"
+        if step in {'resume.build_profile', 'resume.generate_questions', 'candidate.write_registry'}:
+            synced['resume_profile_file'] = self.cap._expected_resume_profile_ref(synced['resume_file'])
+        if step in {'timer.ensure', 'candidate.write_registry'} and self.cap.timer_ready(synced['candidate_id'], synced['scheduled_at'], synced.get('timer_id')):
+            synced['timer_id'] = str(synced.get('timer_id') or f"timer_{synced['candidate_id']}")
+        if step == 'candidate.write_registry':
+            if not synced.get('latest_interview'):
+                synced['status'] = 'ready'
+            else:
+                synced['status'] = 'interview_completed'
+        return synced
+
+    def _candidate_init_next_step(self, row: dict[str, Any], steps: list[str]) -> str | None:
+        for step in steps:
+            if not self._candidate_init_step_complete(row, step):
+                return step
+        return None
+
+    def _candidate_init_step_summary(self, step: str, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        if step == 'domain.ensure':
+            return {'created': bool(result.get('created')), 'jd_id': result.get('jd_id')}
+        if step == 'resume.parse_pdf':
+            return {'engine': result.get('engine'), 'chars': result.get('chars')}
+        if step == 'resume.build_profile':
+            return {'resume_profile_file': result.get('resume_profile_file'), 'fit_score': result.get('fit_score')}
+        if step == 'resume.generate_questions':
+            return {'resume_question_bank_file': result.get('resume_question_bank_file'), 'questions': result.get('questions')}
+        if step == 'timer.ensure':
+            return {'timer_id': result.get('timer_id')}
+        return {}
+
+    def _run_candidate_init_step(self, row: dict[str, Any], step: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        working = dict(row)
+        jd = self.cap.jd_lookup(working['jd_id'])
+        if step == 'candidate.read_registry':
+            return working, {'candidate_id': working['candidate_id']}
+        if step == 'domain.ensure':
+            result = self.cap.domain_ensure(jd_id=jd['jd_id'], jd_role=jd['jd_role'], jd_text=jd['jd_text'])
+            working['question_bank_id'] = f"{jd['jd_id']}.questions"
+            return working, result
+        if step == 'resume.parse_pdf':
+            return working, self.cap.resume_parse_pdf(working['resume_file'])
+        if step == 'resume.build_profile':
+            result = self.cap.resume_profile_generate(working['resume_file'], working['interview_role'], jd['jd_text'], working.get('candidate_name'))
+            working['resume_profile_file'] = result['resume_profile_file']
+            return working, result
+        if step == 'resume.generate_questions':
+            result = self.cap.resume_question_bank_generate(working['resume_file'], working['interview_role'], jd['jd_text'])
+            working['resume_profile_file'] = self.cap._expected_resume_profile_ref(working['resume_file'])
+            return working, result
+        if step == 'timer.ensure':
+            timer = self.cap.timer_ensure(candidate_id=working['candidate_id'], scheduled_at=working['scheduled_at'])
+            working['timer_id'] = timer['timer_id']
+            return working, timer
+        if step == 'candidate.write_registry':
+            working = self._candidate_init_sync_row(working, step)
+            return self._save_candidate_row(working), {
+                'candidate_id': working['candidate_id'],
+                'question_bank_id': working.get('question_bank_id'),
+                'resume_profile_file': working.get('resume_profile_file'),
+                'timer_id': working.get('timer_id'),
+                'status': working.get('status'),
+            }
+        raise ValueError('candidate_init_step_unsupported')
+
+    def _candidate_init_workflow(self, candidate_id: str) -> dict[str, Any]:
+        steps = self._candidate_init_step_names()
+        row = dict(self._load_candidate(candidate_id))
+        checkpoint = self._candidate_init_checkpoint(row)
+        state_before = row.get('status')
+        step_outcomes: dict[str, str] = {}
+        domain_created = False
+        next_step = self._candidate_init_next_step(row, steps)
+        if checkpoint.get('started_at') is None:
+            checkpoint['started_at'] = datetime.now().astimezone().isoformat()
+        checkpoint['status'] = 'completed' if next_step is None else 'in_progress'
+        checkpoint['current_step'] = next_step
+        checkpoint['next_step'] = next_step
+        checkpoint['updated_at'] = datetime.now().astimezone().isoformat()
+        checkpoint['last_error'] = None
+        row['initialization_checkpoint'] = checkpoint
+        if next_step is not None:
+            row['status'] = 'initializing'
+        row = self._save_candidate_row(row)
+        self.registry.execute(
+            'event.write',
+            event_type='candidate_init_candidate_started',
+            payload={'candidate_id': candidate_id, 'resume_from_step': next_step, 'completed_steps': list(checkpoint['completed_steps'])},
+        )
+        for step in steps:
+            row = dict(self._load_candidate(candidate_id))
+            checkpoint = self._candidate_init_checkpoint(row)
+            if self._candidate_init_step_complete(row, step):
+                if step not in checkpoint['completed_steps']:
+                    checkpoint['completed_steps'].append(step)
+                checkpoint['last_completed_step'] = step
+                checkpoint['current_step'] = None
+                checkpoint['next_step'] = self._candidate_init_next_step(self._candidate_init_sync_row(row, step), steps)
+                checkpoint['updated_at'] = datetime.now().astimezone().isoformat()
+                row = self._candidate_init_sync_row(row, step)
+                row['initialization_checkpoint'] = checkpoint
+                row = self._save_candidate_row(row)
+                self.registry.execute(
+                    'event.write',
+                    event_type='candidate_init_step_skipped',
+                    payload={'candidate_id': candidate_id, 'step': step, 'next_step': checkpoint.get('next_step')},
+                )
+                self._record_persistent_step(
+                    'candidate_init',
+                    step,
+                    state_before=state_before,
+                    state_after=row.get('status'),
+                    candidate_id=candidate_id,
+                    outcome='skipped',
+                    next_step=checkpoint.get('next_step'),
+                )
+                step_outcomes[step] = 'skipped'
+                state_before = row.get('status')
+                continue
+            checkpoint['status'] = 'in_progress'
+            checkpoint['current_step'] = step
+            checkpoint['next_step'] = step
+            checkpoint['updated_at'] = datetime.now().astimezone().isoformat()
+            row['initialization_checkpoint'] = checkpoint
+            row['status'] = 'initializing'
+            row = self._save_candidate_row(row)
+            self.registry.execute('event.write', event_type='candidate_init_step_started', payload={'candidate_id': candidate_id, 'step': step})
+            try:
+                row, result = self._run_candidate_init_step(row, step)
+            except ValueError as exc:
+                error = self._value_error_payload(exc)
+                row = dict(self._load_candidate(candidate_id))
+                checkpoint = self._candidate_init_checkpoint(row)
+                checkpoint['status'] = 'failed'
+                checkpoint['current_step'] = step
+                checkpoint['next_step'] = step
+                checkpoint['updated_at'] = datetime.now().astimezone().isoformat()
+                checkpoint['last_error'] = {'step': step, 'error_code': error['error_code']}
+                row['initialization_checkpoint'] = checkpoint
+                row['status'] = self._candidate_init_error_status(error['error_code'])
+                row = self._save_candidate_row(row)
+                self.registry.execute(
+                    'event.write',
+                    event_type='candidate_init_step_failed',
+                    payload={'candidate_id': candidate_id, 'step': step, 'error_code': error['error_code']},
+                )
+                self.registry.execute(
+                    'event.write',
+                    event_type='candidate_init_candidate_failed',
+                    payload={'candidate_id': candidate_id, 'step': step, 'error_code': error['error_code']},
+                )
+                self._record_persistent_step(
+                    'candidate_init',
+                    step,
+                    state_before=state_before,
+                    state_after=row.get('status'),
+                    candidate_id=candidate_id,
+                    outcome='failed',
+                    error_code=error['error_code'],
+                )
+                raise
+            row = dict(row)
+            if step == 'domain.ensure':
+                domain_created = bool(result.get('created'))
+            checkpoint = self._candidate_init_checkpoint(row)
+            if step not in checkpoint['completed_steps']:
+                checkpoint['completed_steps'].append(step)
+            checkpoint['last_completed_step'] = step
+            checkpoint['current_step'] = None
+            checkpoint['next_step'] = self._candidate_init_next_step(row, steps)
+            checkpoint['updated_at'] = datetime.now().astimezone().isoformat()
+            checkpoint['status'] = 'completed' if checkpoint['next_step'] is None else 'in_progress'
+            checkpoint['last_error'] = None
+            row['initialization_checkpoint'] = checkpoint
+            if checkpoint['next_step'] is not None and row.get('status') not in {'ready', 'interview_completed'}:
+                row['status'] = 'initializing'
+            row = self._save_candidate_row(row)
+            summary = self._candidate_init_step_summary(step, result)
+            self.registry.execute(
+                'event.write',
+                event_type='candidate_init_step_completed',
+                payload={'candidate_id': candidate_id, 'step': step, **summary, 'next_step': checkpoint.get('next_step')},
+            )
+            self._record_persistent_step(
+                'candidate_init',
+                step,
+                state_before=state_before,
+                state_after=row.get('status'),
+                candidate_id=candidate_id,
+                outcome='completed',
+                next_step=checkpoint.get('next_step'),
+                **summary,
+            )
+            step_outcomes[step] = 'completed'
+            state_before = row.get('status')
+        row = dict(self._load_candidate(candidate_id))
+        checkpoint = self._candidate_init_checkpoint(row)
+        checkpoint['status'] = 'completed'
+        checkpoint['current_step'] = None
+        checkpoint['next_step'] = None
+        checkpoint['updated_at'] = datetime.now().astimezone().isoformat()
+        checkpoint['last_error'] = None
+        row = self._candidate_init_sync_row(row, 'candidate.write_registry')
+        row['initialization_checkpoint'] = checkpoint
+        row = self._save_candidate_row(row)
+        self.registry.execute(
+            'event.write',
+            event_type='candidate_init_candidate_completed',
+            payload={'candidate_id': candidate_id, 'completed_steps': list(checkpoint['completed_steps'])},
+        )
+        profile_payload = self.cap.storage.load_json(
+            self.cap.storage.resume_data_dir / Path(self.cap._expected_resume_profile_ref(row['resume_file'])).name
+        ) or {}
+        return {
+            'candidate_id': row['candidate_id'],
+            'jd_id': row['jd_id'],
+            'resume_profile_file': row.get('resume_profile_file'),
+            'fit_score': ((profile_payload.get('job_fit') or {}).get('fit_score') or 0),
+            'timer_id': row.get('timer_id'),
+            'domain_created': domain_created,
+            'resume_profile_reused': step_outcomes.get('resume.build_profile') == 'skipped',
+            'completed_steps': list(checkpoint['completed_steps']),
+            'checkpoint_status': checkpoint['status'],
+        }
 
     def _mark_candidate_initialization_failed(self, candidate_id: str, error_code: str) -> dict[str, Any]:
         row = dict(self._load_candidate(candidate_id))
