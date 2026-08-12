@@ -26,3 +26,16 @@ review_ticket/
 rag_archive/
 rag_cache/
 todo.md
+
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.yaml
+*.sqlite*
+*.db
+*.pdf
+candidate_dialog*.txt
